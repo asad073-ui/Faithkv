@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-07-24 - B2A-R3 Stage-C R1 provenance-collector repair authorization (AUTHORIZATION ONLY; NO GPU)
+
+Authorization ID `stage-c-2026-07-24-r1` was consumed by the first real
+Stage-C execution attempt (execution SHA
+`df6f006a7483b11efddeca271f897577b551fd1b`, attempt ID
+`d88e5c48443947e0a7eaf5bc0464789c`), which failed with
+`KeyError: '3c853cff34e52d792cd0e5a96d1a5369f17f8047'` inside
+`collect_execution_provenance`, strictly before device preflight, CUDA
+initialization, or worker launch. Root cause: the collector unconditionally
+indexes that literal legacy B1 SHA into the ancestry dict it just built
+from the caller's own `required_ancestor_shas`; Stage-C's custom ancestor
+tuple has no reason to contain a B1-era commit. `stage-c-2026-07-24-r1` is
+permanently consumed and will never be replayed; the original claim,
+attempt directory, and forensic audit are preserved unmodified.
+
+This entry authorizes a bounded CPU-only repair to
+`collect_execution_provenance` (see
+`docs/B2A_R3_STAGE_C_R1_PROVENANCE_REPAIR_AUTHORIZATION_2026-07-24.md`),
+performed only in a fresh clean clone
+(`/workspace/Faithkv-stagec-repair`). No production scientific code,
+config, or evidence path is authorized to change. A new,
+separately-authorized Stage-C execution authorization
+(`stage-c-2026-07-24-r2`) may be created only after this repair passes a
+fresh independent audit.
+
 ## 2026-07-24 - B2A-R3 Stage-C invocation argv repair (CPU TESTS; NO REAL EXECUTION)
 
 Repairs the independent-audit blocker by sanitizing

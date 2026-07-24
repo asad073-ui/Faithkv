@@ -1001,6 +1001,52 @@ REAL CLAIM CONSUMPTION NOT PERFORMED
 REAL STAGE-C EXECUTION NOT PERFORMED
 ```
 
+### Section 1z -- B2A-R3 Stage-C R1 provenance-collector repair (dated 2026-07-24)
+
+Added by
+`docs/B2A_R3_STAGE_C_R1_PROVENANCE_REPAIR_AUTHORIZATION_2026-07-24.md`,
+superseding nothing above. The first real Stage-C execution attempt,
+authorization `stage-c-2026-07-24-r1` (execution SHA
+`df6f006a7483b11efddeca271f897577b551fd1b`, attempt ID
+`d88e5c48443947e0a7eaf5bc0464789c`), consumed its claim and then failed
+with `KeyError: '3c853cff34e52d792cd0e5a96d1a5369f17f8047'` inside
+`collect_execution_provenance`, strictly before device preflight, CUDA
+initialization, model/tokenizer load, or worker launch. Root cause: the
+collector unconditionally indexes that literal legacy B1 SHA into the
+`ancestry` dict it just built from the caller's own
+`required_ancestor_shas`, and Stage-C's custom ancestor tuple has no
+reason to contain a B1-era commit. `stage-c-2026-07-24-r1` is consumed and
+permanently non-reusable; the original evidence (claim, attempt directory,
+forensic audit) is preserved unmodified in the original evidence checkout.
+
+```text
+B2A-R3 STAGE-C R1 PROVENANCE-COLLECTOR REPAIR AUTHORIZED --
+CPU-ONLY, IN A FRESH CLEAN CLONE
+
+R1 CLAIM PERMANENTLY CONSUMED, NEVER REPLAYED
+REAL STAGE-C EXECUTION PROHIBITED
+NEW AUTHORIZATION (stage-c-2026-07-24-r2) REQUIRES A SEPARATE INDEPENDENT AUDIT PASS
+```
+
+- Authorizes only a fix to `collect_execution_provenance`'s
+  backward-compatibility `starting_ancestor_verified` field so it is
+  computed independently of the caller-supplied `required_ancestry` map
+  (never a hard index that can `KeyError`, never a fabricated `True`,
+  never a mutation of `required_ancestry` to insert the legacy key), an
+  audited (not assumed) `None`-vs-`()` contract fix if warranted, targeted
+  regression tests, and minimal governance documentation.
+- Does **not** authorize any change to `src/kvcot/discovery/b2a_workers.py`,
+  scientific coordinator/swap/no-op/bridge/scoring-window/pair/runtime/VRAM
+  logic, `configs/`, `results/`, `third_party/R-KV/`, the selected
+  manifest, selection provenance, qualification artifact, candidate
+  manifest, real Stage-C execution, real claim consumption, CUDA, model or
+  tokenizer loading, worker launch, or any new Stage-C execution
+  authorization (that requires its own separate, later, independently
+  audited artifact).
+- All repair work happens only in the clean clone at
+  `/workspace/Faithkv-stagec-repair`; the original evidence checkout is
+  read-only for this repair.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

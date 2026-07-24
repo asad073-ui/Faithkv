@@ -1,6 +1,30 @@
 # Plan and status
 
-## Current status: B2A-R3 Stage-C invocation argv repair implemented locally; CPU validation passed (2026-07-24)
+## Current status: B2A-R3 Stage-C R1 provenance-collector repair authorized; implementation pending (2026-07-24)
+
+The first real Stage-C execution attempt (authorization
+`stage-c-2026-07-24-r1`, execution SHA
+`df6f006a7483b11efddeca271f897577b551fd1b`) consumed its claim and then
+failed with `KeyError: '3c853cff34e52d792cd0e5a96d1a5369f17f8047'` inside
+`collect_execution_provenance`, strictly before device preflight, CUDA
+initialization, or worker launch. `stage-c-2026-07-24-r1` is permanently
+consumed and will never be retried; the original claim, attempt directory,
+and forensic audit remain untouched in the original evidence checkout. A
+bounded CPU-only repair authorization has been produced
+(`docs/B2A_R3_STAGE_C_R1_PROVENANCE_REPAIR_AUTHORIZATION_2026-07-24.md`),
+scoped to `src/kvcot/discovery/attempt_artifacts.py`'s
+backward-compatibility `starting_ancestor_verified` field only.
+
+Next action:
+
+```text
+Implement the repair in the clean clone, add regression tests covering the
+exact R1 shape, run full CPU validation, commit and push, require
+exact-SHA CI, then obtain a fresh independent repair audit before any new
+Stage-C execution authorization (stage-c-2026-07-24-r2) is created.
+```
+
+## Prior status: B2A-R3 Stage-C invocation argv repair implemented locally; CPU validation passed (2026-07-24)
 
 The Stage-C wrapper now writes verifier-compatible sanitized argv evidence
 while keeping the exact authorization document path in dedicated evidence
