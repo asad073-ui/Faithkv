@@ -905,6 +905,36 @@ STAGE C REMAINS BLOCKED
   change to the selected manifest or selection provenance accepted in
   §1t.
 
+### Section 1v -- B2A-R3 Stage-C execution-path implementation authorization (dated 2026-07-24)
+
+Added by
+`docs/B2A_R3_STAGE_C_EXECUTION_PATH_IMPLEMENTATION_AUTHORIZATION_2026-07-24.md`,
+superseding nothing above. The independent Stage-C readiness audit
+(`39573b450be3c78222e8e878092baff85fd4d3df03625fe665f68dfb84619c49`)
+failed because the repository has no fixed-path Stage-C execution command,
+no production `b2a_r3_execution` claim consumption path, and no
+provenance-gated replacement for the old caller-configurable
+`b2a-calibrate` GPU command.
+
+```text
+B2A-R3 STAGE-C EXECUTION-PATH IMPLEMENTATION AUTHORIZED --
+CPU-ONLY INFRASTRUCTURE AND TESTS
+
+REAL CLAIM CONSUMPTION PROHIBITED
+REAL STAGE-C EXECUTION PROHIBITED
+```
+
+- Authorizes only fixed-path Stage-C orchestration, internal claim
+  construction, semantic authorization verification, atomic single-use
+  claim-consumption wiring, post-claim device preflight, delegation to the
+  existing scientific coordinator, Stage-C binding evidence, CLI wiring,
+  CPU tests, and documentation.
+- Does **not** authorize CUDA initialization, model/tokenizer loading for
+  execution, R-KV import, worker launch, real claim creation, real attempt
+  directory creation, selected-manifest/provenance changes, evidence
+  changes, scientific semantic changes, R-KV pin changes, Stage C execution,
+  B2B, or FaithKV method implementation.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

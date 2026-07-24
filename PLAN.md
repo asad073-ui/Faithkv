@@ -1,5 +1,22 @@
 # Plan and status
 
+## Current status: B2A-R3 Stage-C execution-path implementation authorized; no GPU execution (2026-07-24)
+
+The failed Stage-C readiness audit has been accepted as the next repair
+target: no fixed-path Stage-C command exists yet, no production path
+consumes a `b2a_r3_execution` claim, and the old `b2a-calibrate` GPU
+command still accepts a caller-supplied config path. The new authorization
+permits only CPU-only implementation of the missing fixed-path,
+provenance-gated Stage-C wrapper and its tests.
+
+Next action:
+
+```text
+Implement the Stage-C execution entry point, run CPU-only validation, and
+submit it for independent audit. Do not consume a real authorization claim
+and do not execute Stage C.
+```
+
 ## Current status: B2A-R3 production freezer independent-audit defects repaired locally; CPU tests green; freezer not executed (2026-07-24)
 
 The bounded repair authorized at

@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-07-24 - B2A-R3 Stage-C execution-path implementation authorization (AUTHORIZATION ONLY; NO GPU)
+
+Authorizes a bounded CPU-only implementation of the missing B2A-R3
+Stage-C fixed-path, provenance-gated execution entry point. The starting
+authority is SHA `b4b1676a08c55a0918c0f216a3e109ca88f9d905`, CI run
+`30110379400`, R-KV SHA `45eaa7d69d20b7388321f077020a610d9afb65bd`, the
+failed Stage-C readiness audit SHA-256
+`39573b450be3c78222e8e878092baff85fd4d3df03625fe665f68dfb84619c49`, and
+the accepted selected row `test/number_theory/631.json`.
+
+The authorization is limited to fixed-path orchestration, internal claim
+construction, semantic authorization verification, atomic single-use claim
+consumption wiring, post-claim device preflight, delegation to the existing
+scientific coordinator, Stage-C binding evidence, CLI wiring, CPU tests,
+and documentation. It explicitly prohibits real claim consumption, real
+Stage-C execution, CUDA, model/tokenizer loading for execution, R-KV import,
+worker launch, scientific semantic changes, evidence changes, selected
+manifest/provenance changes, and R-KV pin changes.
+
+Full detail:
+`docs/B2A_R3_STAGE_C_EXECUTION_PATH_IMPLEMENTATION_AUTHORIZATION_2026-07-24.md`.
+
 ## 2026-07-24 - B2A-R3 production freezer execution test-assumption repair authorization (AUTHORIZATION ONLY; TEST FILE NOT YET CHANGED)
 
 Exact-SHA CI on the freezer execution-acceptance commit
