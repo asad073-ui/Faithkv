@@ -343,7 +343,21 @@ def _write_stage_c_failure(attempt_directory: Path | None, attempt_id: str | Non
 
 
 def _write_invocation(attempt_directory: Path, plan: StageCExecutionPlan) -> None:
-    safe_argv = [arg for arg in sys.argv if "token" not in arg.lower() and "secret" not in arg.lower()]
+    safe_argv = []
+    skip_next = False
+    for arg in sys.argv:
+        if skip_next:
+            safe_argv.append("<stage-c-document-path-recorded-separately>")
+            skip_next = False
+            continue
+        lowered = arg.lower()
+        if arg == "--authorization-document":
+            safe_argv.append("--stage-c-document")
+            skip_next = True
+        elif "token" in lowered or "secret" in lowered or "password" in lowered or "authorization" in lowered:
+            safe_argv.append("<redacted>")
+        else:
+            safe_argv.append(arg)
     atomic_write_json(
         attempt_directory / "invocation.json",
         {

@@ -279,6 +279,48 @@ def test_execute_consumes_claim_before_device_and_coordinator(tmp_path):
     assert sha256_file(root / c.global_claim_path(AUTH_ID)) == sha256_file(result.authorization_claim_path)
 
 
+def test_stage_c_invocation_argv_is_sanitized_for_attempt_verifier(tmp_path, monkeypatch):
+    root, git_state = _stage_c_repo(tmp_path)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "kvcot",
+            "run-b2a-r3-stage-c",
+            "--authorization-document",
+            "docs/B2A_R3_STAGE_C_EXECUTION_AUTHORIZATION_2026-08-05.md",
+            "--execute",
+        ],
+    )
+
+    def coordinator(_config, _manifest, **kwargs):
+        attempt_directory = Path(kwargs["attempt_directory"])
+        invocation = json.loads((attempt_directory / "invocation.json").read_text(encoding="utf-8"))
+        assert "--authorization-document" not in invocation["argv"]
+        assert "docs/B2A_R3_STAGE_C_EXECUTION_AUTHORIZATION_2026-08-05.md" not in invocation["argv"]
+        assert "--stage-c-document" in invocation["argv"]
+        assert "<stage-c-document-path-recorded-separately>" in invocation["argv"]
+        assert invocation["authorization_document_path"] == AUTH_DOC
+        for item in invocation["argv"]:
+            lowered = item.lower()
+            assert "authorization" not in lowered
+            assert "token" not in lowered
+            assert "secret" not in lowered
+            assert "password" not in lowered
+        raise RuntimeError("stop after invocation assertion")
+
+    with pytest.raises(StageCExecutionRefused, match="retry is prohibited"):
+        _run_b2a_r3_stage_c_execution_internal(
+            authorization_document_path=AUTH_DOC,
+            repository_root=root,
+            git_state=git_state,
+            now=_now,
+            attempt_id_factory=lambda: ATTEMPT_ID,
+            device_preflight_fn=_fake_device,
+            coordinator_fn=coordinator,
+            provenance_collector=_fake_provenance,
+        )
+
+
 def test_second_invocation_refuses_before_device_or_coordinator(tmp_path):
     root, git_state = _stage_c_repo(tmp_path)
     claim_path = root / c.global_claim_path(AUTH_ID)

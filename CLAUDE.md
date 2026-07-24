@@ -985,6 +985,22 @@ REAL STAGE-C EXECUTION PROHIBITED
   changes, R-KV pin changes, CUDA, model/tokenizer loading for execution,
   worker launch, real claim consumption, real Stage-C execution, or B2B.
 
+### Section 1y -- B2A-R3 Stage-C invocation argv repair implementation (dated 2026-07-24)
+
+The §1x repair is implemented locally. Stage-C invocation evidence now
+sanitizes the CLI-shaped argv so the existing attempt verifier's
+credential-marker rule cannot reject the required Stage-C command flag or
+document filename. The exact authorization document path remains recorded
+in dedicated Stage-C evidence fields and `stage_c_binding.json`.
+
+```text
+B2A-R3 STAGE-C INVOCATION ARGV REPAIR IMPLEMENTED LOCALLY --
+CPU VALIDATION PASSED
+
+REAL CLAIM CONSUMPTION NOT PERFORMED
+REAL STAGE-C EXECUTION NOT PERFORMED
+```
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

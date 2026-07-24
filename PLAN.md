@@ -1,5 +1,27 @@
 # Plan and status
 
+## Current status: B2A-R3 Stage-C invocation argv repair implemented locally; CPU validation passed (2026-07-24)
+
+The Stage-C wrapper now writes verifier-compatible sanitized argv evidence
+while keeping the exact authorization document path in dedicated evidence
+fields. A regression test exercises the normal Stage-C CLI-shaped argv and
+confirms no credential-marker token reaches `invocation.json["argv"]`.
+
+Validation:
+
+```text
+Local CPU suite: 1916 passed, 14 deselected, 4 warnings.
+Fixed Stage-C inputs unchanged by saved sha256 sidecar.
+No real Stage-C claim files or attempt directories found.
+```
+
+Next action:
+
+```text
+Commit and push the repair, require exact-SHA CI, then launch the second
+fresh independent implementation audit.
+```
+
 ## Current status: B2A-R3 Stage-C invocation argv repair authorized; implementation pending (2026-07-24)
 
 The first independent implementation audit failed one blocking finding:

@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-07-24 - B2A-R3 Stage-C invocation argv repair (CPU TESTS; NO REAL EXECUTION)
+
+Repairs the independent-audit blocker by sanitizing
+`invocation.json["argv"]` in the Stage-C wrapper: the required
+`--authorization-document` CLI flag is recorded as verifier-compatible
+`--stage-c-document`, the document path is replaced by a placeholder, and
+the exact authorization document path remains preserved in dedicated
+Stage-C evidence fields and `stage_c_binding.json`. Added a regression
+test using the real Stage-C CLI-shaped argv.
+
+No real Stage-C claim was consumed, no real Stage-C attempt directory was
+created, no CUDA/model/tokenizer/R-KV/worker path was invoked, and no
+scientific semantics changed.
+
 ## 2026-07-24 - B2A-R3 Stage-C invocation argv repair authorization (AUTHORIZATION ONLY; NO GPU)
 
 The independent implementation audit of
