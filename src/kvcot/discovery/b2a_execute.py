@@ -229,6 +229,9 @@ def run_b2a_calibration(
     subprocess_runner=None,
     attempt_directory=None,
     cli_device_preflight: dict[str, Any] | None = None,
+    expected_provenance_branch: str | None = None,
+    expected_provenance_rkv_sha: str | None = None,
+    expected_provenance_ancestor_shas: tuple[str, ...] | None = None,
 ) -> B2ACalibrationArtifact:
     """The coordinator (B1B-R3 §11, repaired B1B-R4 §8-§12/§14/§16/§21) --
     called by `kvcot.cli.cmd_b2a_calibrate --execute` (which has already
@@ -638,6 +641,9 @@ def run_b2a_calibration(
             attempt_files_verified, attempt_verification_reasons = verify_attempt_artifacts(
                 attempt_directory, fullkv_result=fullkv.model_dump(mode="json"), rkv_result=rkv.model_dump(mode="json"),
                 expected_config_hash=config_hash, expected_manifest_hash=manifest_hash,
+                expected_branch=expected_provenance_branch or "research/b1b-r4-final-b2a-closure",
+                expected_rkv_sha=expected_provenance_rkv_sha,
+                expected_ancestor_shas=expected_provenance_ancestor_shas,
                 python_executable=python_executable or sys_module.executable, typed_results=True,
             )
             worker_envelopes_verified = verify_worker_envelopes(attempt_directory)
@@ -869,6 +875,9 @@ def run_b2a_calibration(
             prefinal_ok, prefinal_reasons = _verify_prefinal(
                 attempt_directory, fullkv_result=fullkv.model_dump(mode="json"), rkv_result=rkv.model_dump(mode="json"),
                 expected_config_hash=config_hash, expected_manifest_hash=manifest_hash,
+                expected_branch=expected_provenance_branch or "research/b1b-r4-final-b2a-closure",
+                expected_rkv_sha=expected_provenance_rkv_sha,
+                expected_ancestor_shas=expected_provenance_ancestor_shas,
                 python_executable=python_executable or sys_module.executable, typed_results=True,
             )
             payload["pre_final_verification"] = {"verified": prefinal_ok, "reasons": list(prefinal_reasons)}

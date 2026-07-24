@@ -26,6 +26,7 @@ EXPECTED_COMMANDS = {
     "freeze-b2a-r3-selected-row",
     "verify-b2a-r3-selection",
     "verify-b2a-r3-authorization",
+    "run-b2a-r3-stage-c",
 }
 
 
@@ -407,6 +408,70 @@ def test_real_committed_evidence_selects_ordinal_1_row_631_and_dry_run_would_fre
     # No production writes occurred as a side effect of this test.
     assert Path(SELECTED_MANIFEST_PATH).read_bytes() == manifest_before
     assert os.path.exists("results/decisions/b2a_r3_selection_provenance.json") == provenance_exists_before
+
+
+# --------------------------------------------------------------------- Stage-C CLI
+
+
+def test_stage_c_cli_requires_exactly_one_mode():
+    with pytest.raises(SystemExit):
+        main(["run-b2a-r3-stage-c", "--authorization-document", "docs/x.md"])
+    with pytest.raises(SystemExit):
+        main(["run-b2a-r3-stage-c", "--authorization-document", "docs/x.md", "--dry-run", "--execute"])
+
+
+def test_stage_c_cli_has_no_forbidden_overrides():
+    parser = build_parser()
+    stage_c_parser = None
+    for action in parser._subparsers._group_actions:  # noqa: SLF001
+        stage_c_parser = action.choices.get("run-b2a-r3-stage-c")
+        break
+    assert stage_c_parser is not None
+    option_strings = {opt for action in stage_c_parser._actions for opt in action.option_strings}  # noqa: SLF001
+    assert option_strings == {"-h", "--help", "--authorization-document", "--dry-run", "--execute"}
+
+
+def test_stage_c_cli_dry_run_delegates_to_planner(capsys, monkeypatch):
+    from types import SimpleNamespace
+
+    plan = SimpleNamespace(
+        authorization_id="stage-c-test",
+        authorization_stage="b2a_r3_execution",
+        authorized_code_commit_sha="a" * 40,
+        observed_execution_commit_sha="b" * 40,
+        authorization_document_path="docs/B2A_R3_STAGE_C_EXECUTION_AUTHORIZATION_2026-08-05.md",
+        authorization_document_sha256="c" * 64,
+        config_path="configs/discovery/llama8b_math500_b1024.yaml",
+        config_sha256="d" * 64,
+        candidate_manifest_sha256="e" * 64,
+        qualification_artifact_sha256="f" * 64,
+        selected_manifest_sha256="1" * 64,
+        selection_provenance_sha256="2" * 64,
+        selected_unique_id="test/number_theory/631.json",
+        model_revision="3" * 40,
+        tokenizer_revision="3" * 40,
+        required_rkv_sha="45eaa7d69d20b7388321f077020a610d9afb65bd",
+        global_claim_path="results/decisions/b2a_r3_authorization_claims/stage-c-test.json",
+        attempt_directory_path="results/decisions/b2a_r3_attempt_20260805T000000000000Z_feedface",
+        would_consume_authorization=False,
+        would_initialize_cuda=False,
+        would_load_tokenizer=False,
+        would_load_model=False,
+        would_import_rkv=False,
+        would_run_workers=False,
+    )
+    monkeypatch.setattr("kvcot.discovery.b2a_r3_stage_c.plan_b2a_r3_stage_c_execution", lambda **_kw: plan)
+    rc = main([
+        "run-b2a-r3-stage-c",
+        "--authorization-document",
+        "docs/B2A_R3_STAGE_C_EXECUTION_AUTHORIZATION_2026-08-05.md",
+        "--dry-run",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "authorization_stage = b2a_r3_execution" in out
+    assert "would_initialize_cuda = False" in out
+    assert "would_run_workers = False" in out
 
 
 # --------------------------------------------------------------------- source scan

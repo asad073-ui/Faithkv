@@ -1,5 +1,22 @@
 # Plan and status
 
+## Current status: B2A-R3 Stage-C execution path implemented locally; independent audit pending (2026-07-24)
+
+The authorized Stage-C infrastructure is implemented: fixed-path artifact
+verification, committed authorization-document parsing, internal claim
+construction, single-use claim consumption before device preflight,
+Stage-C binding evidence, CLI wiring, and delegation to the existing
+scientific coordinator. Targeted CPU tests for the new module and B2A-R3
+CLI are green.
+
+Next action:
+
+```text
+Run the full CPU validation suite, commit the implementation, push for
+exact-SHA CI, and obtain a fresh independent implementation audit. Do not
+create or consume the real Stage-C execution authorization yet.
+```
+
 ## Current status: B2A-R3 Stage-C execution-path implementation authorized; no GPU execution (2026-07-24)
 
 The failed Stage-C readiness audit has been accepted as the next repair

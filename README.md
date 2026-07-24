@@ -2,6 +2,17 @@
 
 ## Current status (read this first)
 
+**B2A-R3 STAGE-C EXECUTION PATH IMPLEMENTED LOCALLY; INDEPENDENT AUDIT
+PENDING (2026-07-24).** A fixed-path Stage-C wrapper and CLI now verify the
+frozen B2A-R3 evidence chain, construct the Stage-C authorization claim
+internally, consume the one-use claim before device preflight, write
+Stage-C binding evidence, and delegate to the existing scientific
+coordinator. Actual Stage-C execution was not invoked; no real Stage-C
+claim was consumed; no real Stage-C attempt directory was created. Stage C
+remains blocked pending independent implementation audit and a separate
+one-use execution authorization. See
+`docs/B2A_R3_STAGE_C_EXECUTION_PATH_IMPLEMENTATION_2026-07-24.md`.
+
 **B2A-R3 STEP 3R4 CPU PROTOCOL ALIGNMENT AND STAGE-B READINESS REPAIRS
 IMPLEMENTED — READY FOR INDEPENDENT RE-AUDIT (2026-07-23).** A re-audit
 of Step 3 Stage-A SHA `7062f3cb8a6f555d3b67cf9e9be3bd6710e78120` found six

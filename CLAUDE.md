@@ -935,6 +935,32 @@ REAL STAGE-C EXECUTION PROHIBITED
   changes, scientific semantic changes, R-KV pin changes, Stage C execution,
   B2B, or FaithKV method implementation.
 
+### Section 1w -- B2A-R3 Stage-C execution-path implementation (dated 2026-07-24)
+
+Added by
+`docs/B2A_R3_STAGE_C_EXECUTION_PATH_IMPLEMENTATION_2026-07-24.md`,
+under the §1v authorization. The missing Stage-C fixed-path wrapper is now
+implemented locally: fixed CPU artifact verification, committed Stage-C
+authorization-document parsing, internal claim construction, semantic
+authorization verification, single-use claim consumption before device
+preflight, Stage-C binding evidence, CLI wiring, and delegation to the
+existing B2A scientific coordinator.
+
+```text
+B2A-R3 STAGE-C EXECUTION PATH IMPLEMENTED LOCALLY --
+CPU TESTS TARGETED GREEN
+
+REAL CLAIM CONSUMPTION NOT PERFORMED
+REAL STAGE-C EXECUTION NOT PERFORMED
+INDEPENDENT IMPLEMENTATION AUDIT REQUIRED
+```
+
+- No selected manifest, selection provenance, candidate evidence,
+  qualification evidence, config value, scientific threshold, worker math,
+  swap/no-op/bridge/scoring/attrition semantics, or R-KV pin was changed.
+- Actual `--execute` was not invoked against the real repository. No real
+  Stage-C authorization claim exists for this implementation.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

@@ -116,6 +116,7 @@ def sha256_file(path: Path) -> str:
 
 SEMANTIC_ROLE_BY_RELATIVE_PATH: dict[str, str] = {
     "invocation.json": "invocation",
+    "stage_c_binding.json": "stage_c_binding",
     "preflight.json": "preflight",
     "provenance.json": "provenance",
     "completion.json": "completion",
@@ -221,7 +222,14 @@ def total_physical_ram_bytes() -> int | None:
     return None
 
 
-def collect_execution_provenance(*, repository: Path, expected_rkv_sha: str, artifact_root: Path) -> dict[str, Any]:
+def collect_execution_provenance(
+    *,
+    repository: Path,
+    expected_rkv_sha: str,
+    artifact_root: Path,
+    allowed_dirty_paths: tuple[str, ...] = (),
+    required_ancestor_shas: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
     """Collect CPU-safe provenance without recording credentials or tokens."""
     repository = repository.resolve()
 
@@ -236,10 +244,15 @@ def collect_execution_provenance(*, repository: Path, expected_rkv_sha: str, art
         attempt_relative = artifact_root.resolve().relative_to(repository).as_posix()
     except ValueError:
         attempt_relative = ""
-    status_lines = [
-        line for line in raw_status_lines
-        if not attempt_relative or not line[3:].replace("\\", "/").startswith(attempt_relative + "/")
-    ]
+    allowed_dirty = {path.replace("\\", "/").rstrip("/") for path in allowed_dirty_paths}
+    status_lines = []
+    for line in raw_status_lines:
+        dirty_path = line[3:].replace("\\", "/")
+        if attempt_relative and dirty_path.startswith(attempt_relative + "/"):
+            continue
+        if dirty_path in allowed_dirty:
+            continue
+        status_lines.append(line)
     staged = [line[3:] for line in status_lines if line[:1] not in (" ", "?")]
     unstaged = [line[3:] for line in status_lines if len(line) > 1 and line[1] not in (" ", "?")]
     untracked = [line[3:] for line in status_lines if line.startswith("??")]
@@ -253,7 +266,8 @@ def collect_execution_provenance(*, repository: Path, expected_rkv_sha: str, art
             check=False, capture_output=True,
         ).returncode == 0
 
-    ancestry = {sha: is_ancestor(sha) for sha in B1_REQUIRED_ANCESTOR_SHAS}
+    required_ancestors = required_ancestor_shas or B1_REQUIRED_ANCESTOR_SHAS
+    ancestry = {sha: is_ancestor(sha) for sha in required_ancestors}
 
     package_names = (
         "torch", "transformers", "accelerate", "flash-attn", "datasets",
@@ -281,7 +295,7 @@ def collect_execution_provenance(*, repository: Path, expected_rkv_sha: str, art
             "staged_paths": staged,
             "unstaged_paths": unstaged,
             "untracked_paths": untracked,
-            "starting_commit": B1_REPAIR_ROUND4_STARTING_COMMIT,
+            "starting_commit": required_ancestors[0] if required_ancestors else B1_REPAIR_ROUND4_STARTING_COMMIT,
             "required_ancestry": ancestry,
             "all_required_ancestry_verified": all(ancestry.values()),
             # Retained for backward compatibility with earlier artifacts --

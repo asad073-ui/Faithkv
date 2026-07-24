@@ -3097,6 +3097,84 @@ def cmd_verify_b2a_r3_authorization(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run_b2a_r3_stage_c(args: argparse.Namespace) -> int:
+    if args.dry_run and args.execute:
+        raise SystemExit("run-b2a-r3-stage-c: pass exactly one of --dry-run or --execute, not both.")
+    if not args.dry_run and not args.execute:
+        raise SystemExit("run-b2a-r3-stage-c: pass exactly one of --dry-run or --execute.")
+
+    from kvcot.discovery.b2a_r3_stage_c import (
+        StageCExecutionRefused,
+        plan_b2a_r3_stage_c_execution,
+        run_b2a_r3_stage_c_execution,
+    )
+    from kvcot.discovery.b2a_r3_authorization import AuthorizationAlreadyConsumed, AuthorizationClaimRefused
+
+    try:
+        if args.dry_run:
+            plan = plan_b2a_r3_stage_c_execution(
+                authorization_document_path=args.authorization_document,
+                repository_root=".",
+            )
+            print("run-b2a-r3-stage-c dry-run plan:")
+            for key in (
+                "authorization_id",
+                "authorization_stage",
+                "authorized_code_commit_sha",
+                "observed_execution_commit_sha",
+                "authorization_document_path",
+                "authorization_document_sha256",
+                "config_path",
+                "config_sha256",
+                "candidate_manifest_sha256",
+                "qualification_artifact_sha256",
+                "selected_manifest_sha256",
+                "selection_provenance_sha256",
+                "selected_unique_id",
+                "model_revision",
+                "tokenizer_revision",
+                "required_rkv_sha",
+                "global_claim_path",
+                "attempt_directory_path",
+                "would_consume_authorization",
+                "would_initialize_cuda",
+                "would_load_tokenizer",
+                "would_load_model",
+                "would_import_rkv",
+                "would_run_workers",
+            ):
+                print(f"  {key} = {getattr(plan, key)}")
+            return 0
+
+        result = run_b2a_r3_stage_c_execution(
+            authorization_document_path=args.authorization_document,
+            repository_root=".",
+        )
+        print("run-b2a-r3-stage-c execute result:")
+        for key in (
+            "authorization_id",
+            "authorization_claim_path",
+            "authorization_claim_canonical_sha256",
+            "attempt_id",
+            "attempt_directory",
+            "selected_unique_id",
+            "config_sha256",
+            "selection_provenance_sha256",
+            "device_preflight_passed",
+            "fullkv_process_outcome",
+            "rkv_process_outcome",
+            "final_verification_passed",
+            "overall_gate_passed",
+            "authorization_consumed",
+            "retry_allowed",
+        ):
+            print(f"  {key} = {getattr(result, key)}")
+        return 0 if result.overall_gate_passed and result.final_verification_passed else 2
+    except (StageCExecutionRefused, AuthorizationClaimRefused, AuthorizationAlreadyConsumed) as exc:
+        print(f"run-b2a-r3-stage-c: REFUSED: {exc}", file=sys.stderr)
+        return 2
+
+
 # ----------------------------------------------------------------------------- main
 
 def build_parser() -> argparse.ArgumentParser:
@@ -3288,6 +3366,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--provenance", default=None)
     p.add_argument("--repository-root", default=".")
     p.set_defaults(func=cmd_verify_b2a_r3_authorization)
+
+    p = sub.add_parser(
+        "run-b2a-r3-stage-c",
+        help="B2A-R3: fixed-path Stage-C dry-run or one-use authorized execution.",
+    )
+    p.add_argument("--authorization-document", required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--execute", action="store_true")
+    p.set_defaults(func=cmd_run_b2a_r3_stage_c)
 
     return parser
 

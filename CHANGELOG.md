@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-07-24 - B2A-R3 Stage-C execution path implemented (CPU TESTS; NO REAL EXECUTION)
+
+Implements the authorized fixed-path Stage-C orchestration entry point:
+`src/kvcot/discovery/b2a_r3_stage_c.py` and
+`kvcot run-b2a-r3-stage-c`. The new path verifies the fixed config,
+candidate manifest, qualification artifact, selected manifest, and
+selection provenance; parses a committed Stage-C authorization document;
+constructs the Stage-C claim internally; consumes the deterministic claim
+before device preflight; writes `stage_c_binding.json`; delegates to the
+existing B2A scientific coordinator; and preserves single-use/no-retry
+failure semantics.
+
+Metadata-only support was added so Stage-C attempts can filter the consumed
+claim from CPU provenance and verify branch/ancestor policy for the
+B2A-R3 branch while preserving old defaults for existing callers. No
+scientific thresholds, worker math, swap/no-op/bridge/scoring semantics,
+selected evidence, config, or R-KV pin changed.
+
+Actual Stage-C execute was not invoked, no real Stage-C claim was consumed,
+and no real Stage-C attempt directory was created. Independent
+implementation audit remains required before any one-use execution
+authorization.
+
+Full detail:
+`docs/B2A_R3_STAGE_C_EXECUTION_PATH_IMPLEMENTATION_2026-07-24.md`.
+
 ## 2026-07-24 - B2A-R3 Stage-C execution-path implementation authorization (AUTHORIZATION ONLY; NO GPU)
 
 Authorizes a bounded CPU-only implementation of the missing B2A-R3

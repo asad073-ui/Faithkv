@@ -142,7 +142,14 @@ def _is_hex_sha(value: Any, *, length: int = 40) -> bool:
     return isinstance(value, str) and len(value) == length and all(c in "0123456789abcdef" for c in value.lower())
 
 
-def _verify_provenance(provenance: dict[str, Any], reasons: list[str]) -> None:
+def _verify_provenance(
+    provenance: dict[str, Any],
+    reasons: list[str],
+    *,
+    expected_branch: str = REQUIRED_BRANCH,
+    expected_rkv_sha: str | None = None,
+    expected_ancestor_shas: tuple[str, ...] | None = None,
+) -> None:
     """R3: enforces the parts of the collected provenance that determine
     experiment identity and repository integrity -- never unstable
     cosmetic fields. `git_evidence`/`system`/`software` are each optional
@@ -155,30 +162,32 @@ def _verify_provenance(provenance: dict[str, Any], reasons: list[str]) -> None:
     if not isinstance(git_evidence, dict):
         reasons.append("provenance.json has no git evidence")
     else:
-        if git_evidence.get("branch") != REQUIRED_BRANCH:
-            reasons.append(f"provenance.json git evidence branch != {REQUIRED_BRANCH!r}")
+        if git_evidence.get("branch") != expected_branch:
+            reasons.append(f"provenance.json git evidence branch != {expected_branch!r}")
         head = git_evidence.get("head")
         if not _is_hex_sha(head):
             reasons.append("provenance.json git evidence has no 40-hex HEAD SHA")
         origin_branch_sha = git_evidence.get("origin_branch_sha")
         if origin_branch_sha != head:
             reasons.append("provenance.json git evidence origin_branch_sha does not match head")
-        if git_evidence.get("starting_commit") != B1_REPAIR_ROUND4_STARTING_COMMIT:
+        required_ancestors = expected_ancestor_shas or B1_REQUIRED_ANCESTOR_SHAS
+        if expected_ancestor_shas is None and git_evidence.get("starting_commit") != B1_REPAIR_ROUND4_STARTING_COMMIT:
             reasons.append(f"provenance.json starting_commit != {B1_REPAIR_ROUND4_STARTING_COMMIT!r}")
         required_ancestry = git_evidence.get("required_ancestry")
         if not isinstance(required_ancestry, dict) or not all(
-            required_ancestry.get(sha) is True for sha in B1_REQUIRED_ANCESTOR_SHAS
+            required_ancestry.get(sha) is True for sha in required_ancestors
         ):
             reasons.append(
-                f"provenance.json required_ancestry does not attest all of {list(B1_REQUIRED_ANCESTOR_SHAS)} as true"
+                f"provenance.json required_ancestry does not attest all of {list(required_ancestors)} as true"
             )
         if git_evidence.get("all_required_ancestry_verified") is not True:
             reasons.append("provenance.json all_required_ancestry_verified is not true")
-        expected_rkv_sha = git_evidence.get("expected_rkv_sha")
-        if expected_rkv_sha != PINNED_RKV_UPSTREAM_REVISION:
-            reasons.append(f"provenance.json expected_rkv_sha != {PINNED_RKV_UPSTREAM_REVISION!r}")
+        provenance_expected_rkv_sha = git_evidence.get("expected_rkv_sha")
+        required_rkv_sha = expected_rkv_sha or PINNED_RKV_UPSTREAM_REVISION
+        if provenance_expected_rkv_sha != required_rkv_sha:
+            reasons.append(f"provenance.json expected_rkv_sha != {required_rkv_sha!r}")
         observed_rkv_sha = git_evidence.get("rkv_submodule_sha")
-        if observed_rkv_sha != expected_rkv_sha:
+        if observed_rkv_sha != provenance_expected_rkv_sha:
             reasons.append("provenance.json rkv_submodule_sha does not match expected_rkv_sha")
         if git_evidence.get("rkv_submodule_match") is not True:
             reasons.append("provenance.json git evidence does not attest the pinned R-KV submodule")
@@ -387,6 +396,9 @@ def verify_attempt_artifacts(
     rkv_result: dict[str, Any],
     expected_config_hash: str | None = None,
     expected_manifest_hash: str | None = None,
+    expected_branch: str = REQUIRED_BRANCH,
+    expected_rkv_sha: str | None = None,
+    expected_ancestor_shas: tuple[str, ...] | None = None,
     python_executable: str | None = None,
     typed_results: bool = False,
 ) -> tuple[bool, tuple[str, ...]]:
@@ -481,7 +493,13 @@ def verify_attempt_artifacts(
 
     provenance = load_json("provenance.json")
     if provenance is not None:
-        _verify_provenance(provenance, reasons)
+        _verify_provenance(
+            provenance,
+            reasons,
+            expected_branch=expected_branch,
+            expected_rkv_sha=expected_rkv_sha,
+            expected_ancestor_shas=expected_ancestor_shas,
+        )
 
     process_outcome = load_json("process_outcome.json")
     if process_outcome is not None:
