@@ -876,6 +876,35 @@ STAGE C REMAINS BLOCKED
   source, scientific configuration, candidate manifest, qualification
   artifact, consumed claim, or R-KV pin changed by this section.
 
+### Section 1u -- B2A-R3 production freezer execution test-assumption repair authorization (dated 2026-07-24)
+
+Added by
+`docs/B2A_R3_PRODUCTION_SELECTED_ROW_FREEZER_EXECUTION_TEST_ASSUMPTION_REPAIR_AUTHORIZATION_2026-07-24.md`,
+superseding nothing above. Exact-SHA CI on the §1t acceptance commit
+(`6e808cc4a57bd7d0c653eef003499d48f883bff7`, run `30109659503`) failed 1 of
+1904 non-GPU tests
+(`test_frozen_manifest_file_loads_and_validates`, `assert 287 == 365`):
+this test's own docstring hard-codes the *prior* B2A-R2 frozen row's
+identity as a permanent invariant, an assumption §1t's own accepted freeze
+directly and correctly falsified -- exactly the same shape of defect §1o
+already repaired once. Authorizes a narrow, test-file-only repair updating
+the golden values to the newly accepted frozen row
+(`example_index=287`, `test/number_theory/631.json`) plus stronger
+row-identity-independent structural assertions.
+
+```text
+B2A-R3 PRODUCTION FREEZER EXECUTION TEST-ASSUMPTION REPAIR AUTHORIZED --
+TEST FILE ONLY
+
+REPAIR IMPLEMENTATION IS THE NEXT REQUIRED ACTION
+STAGE C REMAINS BLOCKED
+```
+
+- Does **not** authorize any change under `src/`, `configs/`,
+  `third_party/R-KV/`, or `results/`; any scientific-setting change; or any
+  change to the selected manifest or selection provenance accepted in
+  §1t.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

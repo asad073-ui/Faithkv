@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-07-24 - B2A-R3 production freezer execution test-assumption repair authorization (AUTHORIZATION ONLY; TEST FILE NOT YET CHANGED)
+
+Exact-SHA CI on the freezer execution-acceptance commit
+(`6e808cc4a57bd7d0c653eef003499d48f883bff7`, run `30109659503`) failed 1 of
+1904 non-GPU tests: `test_frozen_manifest_file_loads_and_validates`
+(`assert 287 == 365`). Root cause: the test hard-codes the *prior* B2A-R2
+frozen row (`test/number_theory/820.json`) as a permanent invariant, an
+assumption the accepted B2A-R3 freeze (§1t) correctly falsified -- the
+same defect shape §1o already repaired once. Authorizes a narrow,
+test-file-only repair to the newly accepted row plus stronger
+row-identity-independent structural assertions.
+
+Full detail:
+`docs/B2A_R3_PRODUCTION_SELECTED_ROW_FREEZER_EXECUTION_TEST_ASSUMPTION_REPAIR_AUTHORIZATION_2026-07-24.md`.
+
 ## 2026-07-24 - B2A-R3 production selected-row freezer executed and accepted (CPU-ONLY, EXIT 0, INDEPENDENTLY AUDITED)
 
 Following the independent freezer-repair re-audit PASS of SHA
