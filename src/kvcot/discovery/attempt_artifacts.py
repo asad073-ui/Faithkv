@@ -178,10 +178,16 @@ def build_attempt_references(attempt: AttemptDirectory, *, exclude: tuple[str, .
 # starting commit; the two earlier execution-boundary commits remain
 # required ancestors. Never only 3c853cf.
 B1_REPAIR_ROUND4_STARTING_COMMIT = "419bbc0020b374d6c4a2085a7a04ff293d7ec680"
+# B2A-R3 Stage-C R1 repair: the historical B1 starting ancestor, retained
+# only for the backward-compatibility `starting_ancestor`/
+# `starting_ancestor_verified` fields below -- a caller-supplied
+# `required_ancestor_shas` (e.g. Stage-C's own ancestor chain) is never
+# required to contain this SHA.
+LEGACY_STARTING_ANCESTOR_SHA = "3c853cff34e52d792cd0e5a96d1a5369f17f8047"
 B1_REQUIRED_ANCESTOR_SHAS: tuple[str, ...] = (
     B1_REPAIR_ROUND4_STARTING_COMMIT,
     "7ef13ae566e7c3e699e5143405baf76a81078edf",
-    "3c853cff34e52d792cd0e5a96d1a5369f17f8047",
+    LEGACY_STARTING_ANCESTOR_SHA,
 )
 
 
@@ -266,8 +272,24 @@ def collect_execution_provenance(
             check=False, capture_output=True,
         ).returncode == 0
 
-    required_ancestors = required_ancestor_shas or B1_REQUIRED_ANCESTOR_SHAS
+    # `None` means "caller did not specify, use the historical B1 defaults";
+    # an explicit `()` means "this caller's required-ancestry set is
+    # deliberately empty" and must not silently fall back to B1_REQUIRED_
+    # ANCESTOR_SHAS (audited against every current caller/test: none pass a
+    # bare `()`, so this is behavior-preserving today and only matters for
+    # a future explicit-empty caller).
+    required_ancestors = B1_REQUIRED_ANCESTOR_SHAS if required_ancestor_shas is None else required_ancestor_shas
     ancestry = {sha: is_ancestor(sha) for sha in required_ancestors}
+    # Backward-compatible field: independent of whatever ancestry set the
+    # caller actually required -- never hard-indexes into `ancestry` (a
+    # custom, e.g. Stage-C, tuple has no reason to contain this legacy B1
+    # SHA), never fabricates `True`, and never mutates `ancestry`/
+    # `required_ancestry` to insert the legacy key.
+    legacy_starting_ancestor_verified = (
+        ancestry[LEGACY_STARTING_ANCESTOR_SHA]
+        if LEGACY_STARTING_ANCESTOR_SHA in ancestry
+        else is_ancestor(LEGACY_STARTING_ANCESTOR_SHA)
+    )
 
     package_names = (
         "torch", "transformers", "accelerate", "flash-attn", "datasets",
@@ -300,8 +322,8 @@ def collect_execution_provenance(
             "all_required_ancestry_verified": all(ancestry.values()),
             # Retained for backward compatibility with earlier artifacts --
             # 3c853cf is no longer the SOLE start authority.
-            "starting_ancestor": "3c853cff34e52d792cd0e5a96d1a5369f17f8047",
-            "starting_ancestor_verified": ancestry["3c853cff34e52d792cd0e5a96d1a5369f17f8047"],
+            "starting_ancestor": LEGACY_STARTING_ANCESTOR_SHA,
+            "starting_ancestor_verified": legacy_starting_ancestor_verified,
             "rkv_submodule_sha": observed_rkv_sha,
             "expected_rkv_sha": expected_rkv_sha,
             "rkv_submodule_match": observed_rkv_sha == expected_rkv_sha,

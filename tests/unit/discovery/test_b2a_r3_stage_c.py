@@ -6,12 +6,20 @@ import inspect
 import json
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 from kvcot.discovery import b2a_r3_contract as c
-from kvcot.discovery.attempt_artifacts import AttemptDirectory, atomic_write_json, build_attempt_references
+from kvcot.discovery.attempt_artifacts import (
+    AttemptDirectory,
+    LEGACY_STARTING_ANCESTOR_SHA,
+    atomic_write_json,
+    build_attempt_references,
+    collect_execution_provenance,
+)
 from kvcot.discovery.b2a_r3_stage_c import (
     REQUIRED_BRANCH,
     REQUIRED_SELECTED_UNIQUE_ID,
@@ -95,6 +103,27 @@ def _stage_c_repo(tmp_path: Path) -> tuple[Path, FakeGitState]:
             stage_b_claim["observed_execution_commit_sha"]: (stage_b_claim["authorization_document_path"],),
         },
     )
+    return root, git_state
+
+
+def _run_git(args: list[str], cwd: Path) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _stage_c_repo_with_real_git(tmp_path: Path) -> tuple[Path, FakeGitState]:
+    """Same fixture as `_stage_c_repo`, but `root` is a real Git repository
+    (with a tracked `third_party/R-KV` path, no legacy B1 commit anywhere in
+    its history) instead of a bare `.git` placeholder -- required to exercise
+    the *real* `collect_execution_provenance`, which shells out to `git`."""
+    root, git_state = _stage_c_repo(tmp_path)
+    shutil.rmtree(root / ".git")
+    (root / "third_party" / "R-KV").mkdir(parents=True, exist_ok=True)
+    (root / "third_party" / "R-KV" / ".keep").write_text("", encoding="utf-8")
+    _run_git(["init", "-q"], root)
+    _run_git(["config", "user.email", "test@example.com"], root)
+    _run_git(["config", "user.name", "Test"], root)
+    _run_git(["add", "-A"], root)
+    _run_git(["commit", "-q", "-m", "stage-c fixture"], root)
     return root, git_state
 
 
@@ -354,3 +383,80 @@ def test_corrupt_selected_row_is_rejected(tmp_path):
             now=_now,
             attempt_id_factory=lambda: ATTEMPT_ID,
         )
+
+
+def test_real_provenance_collector_no_longer_blocks_before_device_preflight(tmp_path):
+    """B2A-R3 Stage-C R1 regression: authorization `stage-c-2026-07-24-r1`
+    was consumed and then failed with
+    `KeyError: '3c853cff34e52d792cd0e5a96d1a5369f17f8047'` inside the real
+    `collect_execution_provenance`, strictly before device preflight, CUDA
+    initialization, or worker launch. This test exercises the exact
+    production call shape -- the real collector, a custom
+    `required_ancestor_shas` tuple built the same way Stage-C really builds
+    it (`(authorized_code_commit_sha, *claim required_ancestor_shas)`, here
+    `(IMPLEMENTATION_SHA,)`, which does not contain the legacy B1 SHA) --
+    against a real (throwaway) Git repository, and asserts execution reaches
+    the mocked device preflight and coordinator instead of raising."""
+    root, git_state = _stage_c_repo_with_real_git(tmp_path)
+    calls: list[str] = []
+    was_torch_already_imported = "torch" in sys.modules
+
+    def device():
+        calls.append("device")
+        assert "torch" not in sys.modules or was_torch_already_imported
+        return _fake_device()
+
+    def coordinator(_config, _manifest, **kwargs):
+        calls.append("coordinator")
+        attempt_directory = Path(kwargs["attempt_directory"])
+        atomic_write_json(
+            attempt_directory / "process_outcome.json",
+            {
+                "attempt_id": ATTEMPT_ID,
+                "return_codes": {"fullkv": 0, "rkv": 0},
+                "timeout_state": {"fullkv": False, "rkv": False},
+                "partial_success": False,
+                "coordinator_observed_process_seconds": {"fullkv": 1.0, "rkv": 1.0},
+            },
+        )
+        atomic_write_json(
+            attempt_directory / "completion.json",
+            {
+                "attempt_id": ATTEMPT_ID,
+                "finished_at": _now().isoformat(),
+                "outcome": "gate_passed",
+                "exit_code": 0,
+                "gate_passed": True,
+                "intended_final_relative_path": "final.json",
+                "artifact_path": str(attempt_directory / "final.json"),
+                "config_hash": "not-used-by-final-reference-test",
+                "manifest_hash": "not-used-by-final-reference-test",
+            },
+        )
+        attempt = AttemptDirectory(attempt_id=ATTEMPT_ID, path=attempt_directory)
+        atomic_write_json(
+            attempt_directory / "final.json",
+            {"passed": True, "attempt_artifacts": build_attempt_references(attempt, exclude=("final.json",))},
+        )
+        return SimpleNamespace(overall_passed=True)
+
+    result = _run_b2a_r3_stage_c_execution_internal(
+        authorization_document_path=AUTH_DOC,
+        repository_root=root,
+        git_state=git_state,
+        now=_now,
+        attempt_id_factory=lambda: ATTEMPT_ID,
+        device_preflight_fn=device,
+        coordinator_fn=coordinator,
+        provenance_collector=collect_execution_provenance,
+    )
+
+    assert calls == ["device", "coordinator"]
+    assert result.authorization_consumed is True
+
+    provenance_path = result.attempt_directory / "provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    git_evidence = provenance["git"]
+    assert LEGACY_STARTING_ANCESTOR_SHA not in git_evidence["required_ancestry"]
+    assert IMPLEMENTATION_SHA in git_evidence["required_ancestry"]
+    assert isinstance(git_evidence["starting_ancestor_verified"], bool)
