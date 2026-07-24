@@ -961,6 +961,30 @@ INDEPENDENT IMPLEMENTATION AUDIT REQUIRED
 - Actual `--execute` was not invoked against the real repository. No real
   Stage-C authorization claim exists for this implementation.
 
+### Section 1x -- B2A-R3 Stage-C invocation argv repair authorization (dated 2026-07-24)
+
+Added by
+`docs/B2A_R3_STAGE_C_EXECUTION_PATH_INVOCATION_ARGV_REPAIR_AUTHORIZATION_2026-07-24.md`,
+after the first independent implementation audit failed one blocking
+metadata finding. The normal Stage-C CLI command contains
+`--authorization-document` and a document filename containing
+`AUTHORIZATION`; the existing final attempt verifier rejects such argv
+entries as credential-like.
+
+```text
+B2A-R3 STAGE-C INVOCATION ARGV REPAIR AUTHORIZED --
+CPU-ONLY METADATA REPAIR
+
+REAL CLAIM CONSUMPTION PROHIBITED
+REAL STAGE-C EXECUTION PROHIBITED
+```
+
+- Authorizes only Stage-C invocation argv sanitization, tests, and minimal
+  documentation/status updates.
+- Does **not** authorize selected-evidence changes, scientific semantic
+  changes, R-KV pin changes, CUDA, model/tokenizer loading for execution,
+  worker launch, real claim consumption, real Stage-C execution, or B2B.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

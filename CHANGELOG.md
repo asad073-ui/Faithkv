@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-07-24 - B2A-R3 Stage-C invocation argv repair authorization (AUTHORIZATION ONLY; NO GPU)
+
+The independent implementation audit of
+`4d402fcb1004b6b3af7a2ae6bccad45e4039f847` failed one blocking
+metadata/orchestration finding: the Stage-C CLI writes
+`--authorization-document` and a filename containing `AUTHORIZATION` into
+`invocation.json["argv"]`, while the existing final attempt verifier
+rejects argv entries containing `authorization` as credential-like. This
+could consume the one-use authorization and run workers before failing
+final verification.
+
+Authorizes only a CPU-only argv-sanitization repair in Stage-C invocation
+evidence, plus tests and documentation. It does not authorize real claim
+consumption, real Stage-C execution, CUDA, model/tokenizer loading, R-KV
+import, worker launch, scientific semantic changes, evidence changes, or
+R-KV pin changes.
+
+Full detail:
+`docs/B2A_R3_STAGE_C_EXECUTION_PATH_INVOCATION_ARGV_REPAIR_AUTHORIZATION_2026-07-24.md`.
+
 ## 2026-07-24 - B2A-R3 Stage-C execution path implemented (CPU TESTS; NO REAL EXECUTION)
 
 Implements the authorized fixed-path Stage-C orchestration entry point:

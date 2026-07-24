@@ -1,5 +1,22 @@
 # Plan and status
 
+## Current status: B2A-R3 Stage-C invocation argv repair authorized; implementation pending (2026-07-24)
+
+The first independent implementation audit failed one blocking finding:
+Stage-C `invocation.json["argv"]` can contain the required
+`--authorization-document` flag and document filename, which the existing
+attempt verifier rejects as credential-like. A bounded CPU-only repair is
+authorized to sanitize Stage-C argv evidence while retaining the exact
+authorization document path in dedicated evidence fields.
+
+Next action:
+
+```text
+Implement the argv-sanitization repair, rerun CPU tests, commit and push
+the repair, require exact-SHA CI, then launch a second fresh independent
+audit. Do not create the one-use execution authorization yet.
+```
+
 ## Current status: B2A-R3 Stage-C execution path implemented locally; independent audit pending (2026-07-24)
 
 The authorized Stage-C infrastructure is implemented: fixed-path artifact
