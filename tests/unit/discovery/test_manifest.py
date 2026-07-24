@@ -37,18 +37,33 @@ VALID_KWARGS = dict(
 
 
 def test_frozen_manifest_file_loads_and_validates():
-    """example_index=365 (unique_id="test/number_theory/820.json") since
-    the B2A-R2 row freeze (2026-07-22,
-    docs/B2A_R1_FAILURE_AND_B2A_R2_PROTOCOL_2026-07-22.md) -- B2A-R1's
-    example_index=0 produced zero R-KV compaction events and was replaced
-    by FullKV-only qualification's first satisfying candidate, never a
-    hand-picked index."""
+    """example_index=287 (unique_id="test/number_theory/631.json") since
+    the B2A-R3 production selected-row freezer execution (2026-07-24,
+    docs/B2A_R3_PRODUCTION_SELECTED_ROW_FREEZER_EXECUTION_ACCEPTANCE_2026-07-24.md)
+    -- candidate ordinal 1, the first row satisfying FullKV-only
+    qualification against the committed B2A-R3 candidate manifest, never a
+    hand-picked index. This test asserts the *current* frozen row's
+    identity; it is expected to require updating again whenever a future
+    authorized freeze changes it (see the row-identity-independent
+    structural assertions below, which do not need to change across such a
+    re-freeze)."""
     manifest = load_b2a_one_example_manifest()
     assert manifest.dataset_repo == MATH500_DATASET_REPO
     assert manifest.dataset_revision == MATH500_DATASET_REVISION
-    assert manifest.example_index == 365
-    assert manifest.unique_id == "test/number_theory/820.json"
+    assert manifest.example_index == 287
+    assert manifest.unique_id == "test/number_theory/631.json"
     assert len(manifest.raw_content_hash) == 64
+
+    # Row-identity-independent structural invariants: hold regardless of
+    # which row is currently frozen, so a future authorized re-freeze
+    # cannot silently regress these even if it changes the asserted
+    # example_index/unique_id above.
+    split, rest = manifest.unique_id.split("/", 1)
+    assert split == manifest.dataset_split
+    assert rest.endswith(".json")
+    assert manifest.prompt_token_ids_sha256 is not None
+    assert len(manifest.prompt_token_ids_sha256) == 64
+    assert all(c in "0123456789abcdef" for c in manifest.prompt_token_ids_sha256)
 
 
 def test_frozen_manifest_file_is_at_the_documented_default_path():
