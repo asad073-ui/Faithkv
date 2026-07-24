@@ -9,16 +9,25 @@ freezer reruns, B2B execution, model/config/dataset/manifest changes,
 scientific semantic changes, R-KV pin changes, CPU offload, repeated
 invocation, automatic retry, or any committed claim JSON.
 
-The independently audited implementation commit is:
+`stage-c-2026-07-24-r1` was consumed exactly once.
+
+R1 failed before CUDA initialization and before FullKV or R-KV launched.
+
+R1 is permanently non-retryable.
+
+R2 is a distinct authorization created only after an independently audited
+provenance-infrastructure repair.
+
+The independently audited provenance-repair implementation commit is:
 
 ```text
-817f4300fd237e1efe9de979a091539fde192991
+b6a71afb0a8538a43775b94f3b821c890f99db74
 ```
 
 The authorization verifier must reject use unless the current clean `HEAD`
 is the later execution-authorization commit that contains this exact
-document, the audited implementation commit above is its ancestor, and the
-diff from that implementation commit to the execution-authorization commit
+document, the audited provenance-repair implementation commit above is its
+ancestor, and the diff from that implementation commit to the execution-authorization commit
 contains only this file.
 
 Exact authorized command:
@@ -46,12 +55,16 @@ Frozen Stage-C bindings:
 ```json
 {
   "authorization_document_schema_version": "faithkv-b2a-r3-stage-authorization-document-v2",
-  "authorization_id": "stage-c-2026-07-24-r1",
+  "authorization_id": "stage-c-2026-07-24-r2",
   "authorization_stage": "b2a_r3_execution",
   "authorized_repository": "asad073-ui/Faithkv",
   "authorized_branch": "research/b2a-r3-runtime-qualified-calibration",
-  "authorized_code_commit_sha": "817f4300fd237e1efe9de979a091539fde192991",
-  "required_ancestor_shas": [],
+  "authorized_code_commit_sha": "b6a71afb0a8538a43775b94f3b821c890f99db74",
+  "required_ancestor_shas": [
+    "df6f006a7483b11efddeca271f897577b551fd1b",
+    "817f4300fd237e1efe9de979a091539fde192991",
+    "6a43d5b7ed39b01c22fcbb71450306cfd059d785"
+  ],
   "required_rkv_sha": "45eaa7d69d20b7388321f077020a610d9afb65bd",
   "candidate_manifest_canonical_sha256": "b8148647698ca5ab5335ea28dc1416109b26f73dd05b87eed2fe9eca4b25ff42",
   "maximum_candidates": null,
@@ -59,7 +72,7 @@ Frozen Stage-C bindings:
   "qualification_artifact_canonical_sha256": "4349edc97a273819d4f5a3e75812af80437971f584071b66b25c858ffa02ff1d",
   "selected_manifest_sha256": "dea628339f4b82678fa18bdc86c8dafa11c5ed87714a8b3a79b588884cab02e0",
   "selected_manifest_hash_algorithm": "B2AOneExampleManifest.manifest_hash-v1",
-  "created_at_utc": "2026-07-24T18:07:04+00:00"
+  "created_at_utc": "2026-07-24T19:52:00+00:00"
 }
 ```
 <!-- END B2A-R3 AUTHORIZATION JSON -->
