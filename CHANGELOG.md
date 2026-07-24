@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-07-24 - B2A-R3 production selected-row freezer executed and accepted (CPU-ONLY, EXIT 0, INDEPENDENTLY AUDITED)
+
+Following the independent freezer-repair re-audit PASS of SHA
+`1ab9632d8fdfb525ad0adae5746a9d1b25ee0244`
+(report SHA-256 `178257e38ff812350518a2db7ab1e4fe886b08721c5401a8a51a5269c7d6c55c`),
+`kvcot freeze-b2a-r3-selected-row --execute` was run exactly once, CPU-only
+and offline, exit code 0. The production selected manifest
+(`configs/discovery/b2a_one_example_manifest.json`) now records
+`test/number_theory/631.json` (candidate ordinal 1, previously
+`test/number_theory/820.json`), and
+`results/decisions/b2a_r3_selection_provenance.json` now exists, binding
+the accepted candidate-manifest, qualification-artifact, and consumed-claim
+canonical hashes. A different, fresh, isolated freezer-output audit passed
+(report SHA-256 `2db7935e595df080bf0d89dea7e0843dda9f0885a03e5e9d5e78ad6ceabe56a4`),
+independently re-verifying every hash, the selection provenance chain, and
+that no CUDA/model inference/dataset access occurred. No FullKV/R-KV
+execution, no scientific-setting change. Stage C remains blocked.
+
+Full detail:
+`docs/B2A_R3_PRODUCTION_SELECTED_ROW_FREEZER_EXECUTION_ACCEPTANCE_2026-07-24.md`.
+
 ## 2026-07-24 - B2A-R3 production freezer independent-audit defects repaired (CPU TESTS GREEN; FREEZER NOT EXECUTED)
 
 Repairs the four blocking/high findings from the failed independent audit

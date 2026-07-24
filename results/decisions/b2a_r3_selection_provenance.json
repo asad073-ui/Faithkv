@@ -1,0 +1,17 @@
+{
+  "artifact_schema_version": "faithkv-b2a-r3-selection-provenance-v1",
+  "qualification_artifact_path": "results/decisions/b2a_r3_qualification.json",
+  "qualification_artifact_canonical_sha256": "4349edc97a273819d4f5a3e75812af80437971f584071b66b25c858ffa02ff1d",
+  "candidate_manifest_path": "configs/discovery/b2a_r3_candidate_manifest.json",
+  "candidate_manifest_canonical_sha256": "b8148647698ca5ab5335ea28dc1416109b26f73dd05b87eed2fe9eca4b25ff42",
+  "selected_manifest_path": "configs/discovery/b2a_one_example_manifest.json",
+  "selected_manifest_sha256": "dea628339f4b82678fa18bdc86c8dafa11c5ed87714a8b3a79b588884cab02e0",
+  "selected_manifest_hash_algorithm": "B2AOneExampleManifest.manifest_hash-v1",
+  "selected_ordinal": 1,
+  "selected_unique_id": "test/number_theory/631.json",
+  "selection_protocol_version": "faithkv-b2a-r3-selection-v1",
+  "row_raw_sha256": "0387e90fc8ce68fe697d9a7dea1b23c2f051e8d728fc3e5fec977a249a757d89",
+  "prompt_token_ids_sha256": "3622a120bddcb1ee8afbfbe44e99548f74c1b1d4aa3aaef06eb3c87216950a0a",
+  "tokenizer_revision_used_for_prompt_hash": "6a6f4aa4197940add57724a7707d069478df56b1",
+  "canonical_sha256": "2be6ef3097bf6362bfb029caee702cfd802ac95f00f8bb4a39ad83e6de593442"
+}

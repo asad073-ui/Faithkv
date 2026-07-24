@@ -832,6 +832,50 @@ STAGE C REMAINS BLOCKED
 - Fresh exact-SHA CI and independent re-audit remain required before any
   separate task may run `kvcot freeze-b2a-r3-selected-row --execute`.
 
+### Section 1t -- B2A-R3 production selected-row freezer execution acceptance (dated 2026-07-24)
+
+Added by
+`docs/B2A_R3_PRODUCTION_SELECTED_ROW_FREEZER_EXECUTION_ACCEPTANCE_2026-07-24.md`,
+superseding nothing above. Following a fresh independent re-audit PASS of
+repair SHA `1ab9632d8fdfb525ad0adae5746a9d1b25ee0244`
+(report SHA-256 `178257e38ff812350518a2db7ab1e4fe886b08721c5401a8a51a5269c7d6c55c`),
+the production selected-row freezer
+(`kvcot freeze-b2a-r3-selected-row --execute`) was run exactly once,
+CPU-only, offline, with exit code 0. A different fresh independent
+freezer-output audit then passed
+(report SHA-256 `2db7935e595df080bf0d89dea7e0843dda9f0885a03e5e9d5e78ad6ceabe56a4`).
+
+```text
+B2A-R3 PRODUCTION SELECTED-ROW FREEZER EXECUTED --
+CPU-ONLY, EXIT CODE 0, INDEPENDENTLY AUDITED
+
+SELECTED ROW: test/number_theory/631.json (ordinal 1)
+SELECTED MANIFEST SHA-256 (manifest_hash-v1): dea628339f4b82678fa18bdc86c8dafa11c5ed87714a8b3a79b588884cab02e0
+SELECTION PROVENANCE CANONICAL SHA-256: 2be6ef3097bf6362bfb029caee702cfd802ac95f00f8bb4a39ad83e6de593442
+
+NO FULLKV/R-KV EXECUTION; NO CUDA; NO MODEL INFERENCE
+STAGE C REMAINS BLOCKED
+```
+
+- The production selected manifest
+  (`configs/discovery/b2a_one_example_manifest.json`) now contains
+  `test/number_theory/631.json` (previously `test/number_theory/820.json`),
+  and `results/decisions/b2a_r3_selection_provenance.json` now exists,
+  binding the candidate-manifest, qualification-artifact, and consumed-claim
+  canonical hashes.
+- Does **not** authorize a second freezer execution (the freezer's own
+  `already_frozen` guard now reports `True`), FullKV, R-KV, Stage C, B2B, or
+  any scientific-setting change.
+- One stale pre-freeze test assumption
+  (`tests/unit/discovery/test_manifest.py::test_frozen_manifest_file_loads_and_validates`,
+  which hard-codes the prior `test/number_theory/820.json` golden values)
+  was identified locally by the output audit. Per the same pattern as §1o,
+  it is addressed only via a separate, bounded, dated repair authorization
+  and implementation commit after this acceptance commit's own exact-SHA CI
+  result is observed -- never folded into this commit. No production
+  source, scientific configuration, candidate manifest, qualification
+  artifact, consumed claim, or R-KV pin changed by this section.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.
