@@ -40,10 +40,10 @@ not counterfactual necessity.
 |---|---|
 | Evidence for | `score_margin_e_minus_r` is 1e-5–1.5e-4 — the scorer barely distinguishes the evicted from the retained token. abs(rho) = 0.2777 means the deployable signal does not predict gain. 7 of 12 gains negative. |
 | Evidence against | Large peak per-token effects (6.4e-2) show the swapped slot *is* used by the model, so the token is not inert. |
-| Testable prediction | Choosing candidates by a direct counterfactual criterion (highest measured future-attention mass, or oracle leave-one-out) yields materially larger positive gains than the current score. |
-| Cheapest discriminating test | **Pilot arm A** below — oracle-selected vs score-selected candidates at identical events. |
-| Expected GPU cost | ≤ 0.5 GPU-hours (1.5B model, 1 example) |
-| Kill condition | If oracle-selected candidates also produce max gain < 0.01 nats, candidate selection is **not** the bottleneck; stop pursuing better scorers. |
+| Testable prediction | At an identical frozen event, at least one eligible token in a small, pre-intervention candidate pool yields materially larger positive gain than the current score-selected token. |
+| Cheapest discriminating test | **Pilot arm A** below — evaluate width one for every token in a deterministic pool of at most four candidates and report the maximum only as a bounded diagnostic upper bound. |
+| Expected GPU cost | ≤ 0.5 GPU-hours (1.5B model, at most 3 examples) |
+| Kill condition | If even the best causally tested candidate in each bounded pool remains below 0.01 nats, improving the existing scorer is unlikely to rescue the mechanism within those pools. |
 
 ### H2 — Intervention dilution / redundancy (STRONG)
 Restoring one KV slot at one (layer, head) is too weak; information is
@@ -53,8 +53,8 @@ redundant across neighbouring heads, layers, and tokens.
 |---|---|
 | Evidence for | 1.2% layer/head coverage. Peak local effect is large but window-mean is ~0, exactly what redundancy predicts. Layer 23 shows 4× smaller propagation. |
 | Evidence against | If redundancy were total, per-token \|Δ\| would be near zero, not 6.4e-2. |
-| Testable prediction | Restoring the same token across N heads (or all heads of a layer) produces gain scaling super-linearly in N; single-head restores stay at floor. |
-| Cheapest discriminating test | **Pilot arm B** — restore-width sweep N ∈ {1, 4, all-heads-in-layer}. |
+| Testable prediction | Restoring the same token across both KV heads in one layer produces a larger gain than restoring one KV head; single-head restores stay at floor. |
+| Cheapest discriminating test | **Pilot arm B** — compare one KV head with all KV heads in the same layer. The selected Qwen model has 12 query-attention heads but exactly 2 KV heads; query heads are not independently restorable KV heads. |
 | Expected GPU cost | ≤ 0.7 GPU-hours |
 | Kill condition | If all-head restore still yields < 0.01 nats, the mechanism is not dilution-limited and the whole single-token-restore framing is dead. |
 
@@ -118,7 +118,8 @@ from H3 (metric insensitivity), at the lowest possible cost, before any
 method work.
 
 ### Constraints (all satisfied)
-- **≤ 3 examples** — uses 3.
+- **≤ 3 examples** — select the first three mechanically qualified rows;
+  fewer than three is mechanically unqualified.
 - **1.5B model** (`deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B`) for initial
   discrimination, per the plan's preference and CLAUDE.md §1's primary model.
 - **≤ 4 GPU-hours** total across all arms — budgeted at ≤ 1.5.
@@ -127,25 +128,70 @@ method work.
 - Includes FullKV and current R-KV controls, plus an explicit no-op.
 - Success and kill criteria predeclared **here, before any run**.
 
+### Frozen qualification, example, and event selection
+
+Iterate no more than the first eight rows in canonical order from
+`configs/discovery/b2a_r3_candidate_manifest.json`. Select the first three
+examples satisfying all of:
+
+- FullKV execution valid;
+- R-KV replay mechanically valid;
+- FullKV and R-KV have matched correctness status;
+- meaningful compression occurred;
+- at least one eligible compaction event exists;
+- the selected event contains at least two eligible candidate tokens; and
+- no swap-gain intervention has yet been evaluated for that example.
+
+For each selected example, choose exactly one event: the eligible event with
+the greatest existing deployable event score, with the lower deterministic
+event index winning a tie. Qualification and event selection may not inspect
+swap gain, an intervention answer-token margin, an intervention answer flip,
+correctness under intervention, or any other intervention outcome. If fewer
+than three examples qualify within the first eight rows, stop and classify
+the pilot as mechanically unqualified. Do not substitute later rows.
+
+For the selected event, construct the Arm-A pool before any intervention.
+The pool contains at most four eligible evicted tokens ordered by existing
+deployable score descending, then absolute token index ascending. Persist the
+complete pool and its ordering. The first token is the current score-selected
+control candidate. No new scorer is trained or introduced.
+
 ### Arms
 
 | Arm | Factor changed | Everything else | GPU budget |
 |---|---|---|---|
-| **Control** | none — current R-KV config, current scorer, single-head restore | baseline | 0.3 h |
-| **A — selection** | candidate chosen by oracle future-attention mass instead of the deployable score | restore width fixed at 1 head | 0.5 h |
-| **B — width** | restore width N ∈ {1, 4, all heads in layer} | candidate fixed to the current scorer's pick | 0.7 h |
-| **C — metric** | readout = answer-token margin + final-answer flip, alongside mean NLL | no intervention change; re-scores arms above | ~0 (shares forward passes) |
-| **No-op** | donor replaced by itself | must be bit-exact | included |
+| **Control** | current score-selected candidate; one selected KV head; unchanged 48-token mean-NLL readout | baseline | included in A |
+| **A — bounded candidate upper bound** | run the identical width-one intervention for every token in the frozen pool of at most four; report every outcome and their maximum | same event, selected layer/head, donor rule, and 48-token scoring window | 0.5 h |
+| **B — restore width** | restore the current score-selected candidate into all KV heads in the selected layer: exactly heads `{0,1}` for this model | candidate, event, layer, donor rule, and readout fixed | 0.7 h |
+| **C — behavioural readout** | record fixed-trace answer-token margins and extraction/correctness state for every already-computed branch | no new generation and no intervention change | shared forward passes |
+| **No-op** | restore the existing donor content into itself | bit-exact NLL arrays and identical output state required | included |
 
 Arms A and B are deliberately orthogonal: A holds width fixed and varies
-selection; B holds selection fixed and varies width. C is a pure readout
-added to both.
+selection; B holds selection fixed and varies only KV-head width within the
+same layer. No cross-layer restore is permitted. C is a pure readout added to
+the already-generated branches.
+
+Arm C uses the frozen natural R-KV trace and its frozen extraction result. At
+each extracted answer-span token position that lies in the evaluated branch,
+record
+`log p(reference token) - max(log p(any non-reference token))`. When the
+reference extracted answer is correct, this is also the
+correct-versus-strongest-alternative margin. The predeclared material margin
+criterion is a sign change in at least one such correct-answer-token margin;
+zero belongs to neither sign, so touching zero alone is not success. An actual
+decoded/extracted-answer change or correctness change also counts. This is an
+interpretable preference-boundary change, not an arbitrary small float delta.
+The pilot performs no free-running generation from an intervention branch;
+fixed-trace extraction/correctness and any unavailable free-running answer
+flip are labeled separately and never conflated.
 
 ### Predeclared success criterion
 
-> The pilot is **informative** iff at least one arm produces
-> `max swap_gain > 0.01` nats on at least one example, using the unchanged
-> frozen `0.01` threshold.
+> The pilot is **informative** iff at least one Arm-A bounded candidate
+> maximum is strictly greater than `0.01` nats, at least one Arm-B all-KV-head
+> gain is strictly greater than `0.01` nats, or Arm C satisfies the predeclared
+> sign-change/extracted-answer/correctness criterion while A and B remain
+> below `0.01` on every example.
 
 Note this is a criterion for *learning something*, not for declaring the
 mechanism real. It reuses the existing frozen threshold precisely so that no
@@ -153,9 +199,12 @@ new number is invented after seeing data.
 
 ### Predeclared kill criteria
 
-1. If **both** arm A (oracle selection) and arm B (all-head restore) stay
-   below 0.01 nats, the single-token-KV-restore mechanism is dead at this
-   operating point. Stop; do not design a method around it; do not run B2B.
+1. If every Arm-A bounded candidate maximum and every Arm-B all-KV-head
+   restore stays below 0.01 nats on all three examples, and the frozen
+   behavioural readout is unchanged, the single-token-KV-restore mechanism
+   is killed at the 1.5B pilot operating point. Stop; do not design a method
+   around it; do not run B2B. This does not establish the same conclusion for
+   the immutable 8B R2 operating point.
 2. If the no-op control is not bit-exact in any arm, the run is void — fix
    the harness, do not interpret the numbers.
 3. If arm C's behavioural readout is also flat while arms A and B are flat,
@@ -165,7 +214,7 @@ new number is invented after seeing data.
 
 | Result | Conclusion |
 |---|---|
-| A moves, B flat | Selection was the bottleneck → invest in candidate scoring |
+| A moves, B flat | Candidate selection is a plausible bottleneck within the bounded tested pools; the maximum is diagnostic, never deployable method performance |
 | B moves, A flat | Dilution was the bottleneck → single-slot restore is the wrong intervention unit |
 | Both move | Both contribute; measure interaction before any method design |
 | **Neither moves** | **Mechanism dead at this operating point — the most likely outcome given R2** |
