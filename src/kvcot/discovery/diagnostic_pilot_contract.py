@@ -7,7 +7,9 @@ reconstruction.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 import re
 from typing import Any, Literal
 
@@ -42,6 +44,21 @@ EXACT_EXECUTION_COMMAND = (
     f"{EXECUTION_AUTHORIZATION_PATH} --execute"
 )
 
+R2_PROTOCOL_DOCUMENT_PATH = (
+    "docs/POST_STAGE_C_DIAGNOSTIC_PILOT_R2_PROTOCOL_FREEZE_2026-07-25.md"
+)
+R2_EXECUTION_AUTHORIZATION_PATH = (
+    "docs/POST_STAGE_C_DIAGNOSTIC_PILOT_R2_EXECUTION_AUTHORIZATION_2026-07-25.md"
+)
+
+#: The two arms of the R2 bounded factorial grid.  ``RESTORE_ARM`` covers
+#: every (candidate rank, restore width) cell; ``NOOP_ARM`` is the single
+#: exact mechanical control.  The grid is a bounded score-prioritized
+#: candidate pool, never a causal oracle or a global upper bound.
+RESTORE_ARM = "restore"
+NOOP_ARM = "no_op"
+PILOT_ARMS = (RESTORE_ARM, NOOP_ARM)
+
 MAXIMUM_QUALIFICATION_CANDIDATES = 8
 MAXIMUM_SELECTED_EXAMPLES = 3
 MAXIMUM_EVENTS_PER_EXAMPLE = 1
@@ -59,6 +76,114 @@ AUTOMATIC_RETRIES = 0
 
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+_EXECUTION_COMMAND_PATTERN = re.compile(
+    r"^kvcot run-post-stage-c-diagnostic-pilot --authorization-document "
+    r"(?P<document>\S+) --execute$"
+)
+
+
+@dataclass(frozen=True)
+class DiagnosticGeneration:
+    """One dated, self-contained diagnostic-pilot generation.
+
+    R1 is the consumed attempt.  It is retained verbatim so its
+    authorization, runtime binding, claim, and attempt stay parseable and
+    verifiable forever.  R2 is the separately authorized repaired pilot.
+    Every path, hash root, and pair budget that could otherwise collide
+    between the two lives here rather than in a single mutable constant.
+    """
+
+    label: str
+    protocol_document_path: str
+    authorization_document_path: str
+    default_runtime_root: str
+    default_output_root: str
+    maximum_pairs_per_selected_example: int
+
+    @property
+    def maximum_total_pairs(self) -> int:
+        return MAXIMUM_SELECTED_EXAMPLES * self.maximum_pairs_per_selected_example
+
+    @property
+    def exact_execution_command(self) -> str:
+        return (
+            "kvcot run-post-stage-c-diagnostic-pilot --authorization-document "
+            f"{self.authorization_document_path} --execute"
+        )
+
+
+R1_GENERATION = DiagnosticGeneration(
+    label="r1",
+    protocol_document_path=PROTOCOL_DOCUMENT_PATH,
+    authorization_document_path=EXECUTION_AUTHORIZATION_PATH,
+    default_runtime_root="/workspace/faithkv-post-stage-c-diagnostic-runtime",
+    default_output_root="/workspace/faithkv-post-stage-c-diagnostic-execution",
+    # Historical R1 grid: every pooled candidate at width one, the rank-zero
+    # candidate at width two, and one no-op.
+    maximum_pairs_per_selected_example=MAXIMUM_CANDIDATE_POOL_SIZE + 2,
+)
+
+R2_GENERATION = DiagnosticGeneration(
+    label="r2",
+    protocol_document_path=R2_PROTOCOL_DOCUMENT_PATH,
+    authorization_document_path=R2_EXECUTION_AUTHORIZATION_PATH,
+    default_runtime_root="/workspace/faithkv-post-stage-c-diagnostic-runtime-r2",
+    default_output_root="/workspace/faithkv-post-stage-c-diagnostic-execution-r2",
+    # R2 bounded factorial grid: every pooled candidate at both restore
+    # widths, plus one exact no-op.
+    maximum_pairs_per_selected_example=MAXIMUM_CANDIDATE_POOL_SIZE * len(RESTORE_WIDTHS) + 1,
+)
+
+GENERATIONS: tuple[DiagnosticGeneration, ...] = (R1_GENERATION, R2_GENERATION)
+
+#: The generation whose intervention grid this implementation actually
+#: executes.  Parsing and verification remain available for every
+#: generation; execution is deliberately restricted to this one.
+EXECUTING_GENERATION = R2_GENERATION
+
+MAXIMUM_PAIRS_PER_SELECTED_EXAMPLE = R2_GENERATION.maximum_pairs_per_selected_example
+MAXIMUM_TOTAL_PAIRS = R2_GENERATION.maximum_total_pairs
+
+
+def generation_by_label(label: str) -> DiagnosticGeneration:
+    for generation in GENERATIONS:
+        if generation.label == label:
+            return generation
+    raise ValueError(f"unknown diagnostic-pilot generation label {label!r}")
+
+
+def generation_for_protocol_document_path(path: str) -> DiagnosticGeneration:
+    for generation in GENERATIONS:
+        if generation.protocol_document_path == path:
+            return generation
+    raise ValueError(f"{path!r} is not a frozen diagnostic-pilot protocol document")
+
+
+def generation_for_authorization_document(path: str | Path) -> DiagnosticGeneration:
+    """Resolve the generation an authorization document belongs to.
+
+    The document is identified by its repository-relative path suffix, so a
+    verified checkout and a test fixture rooted elsewhere resolve the same
+    way while an arbitrary unrelated document never resolves at all.
+    """
+    resolved = Path(path).resolve().as_posix()
+    for generation in GENERATIONS:
+        if resolved == generation.authorization_document_path or resolved.endswith(
+            f"/{generation.authorization_document_path}"
+        ):
+            return generation
+    raise ValueError(
+        f"{path} is not a frozen diagnostic-pilot execution authorization document"
+    )
+
+
+def execution_command_document_argument(command: str) -> str:
+    """Extract the ``--authorization-document`` argument of an exact command."""
+    match = _EXECUTION_COMMAND_PATTERN.fullmatch(command.strip())
+    if match is None:
+        raise ValueError("exact_command does not match the frozen execution command shape")
+    return match.group("document")
 
 
 def canonical_payload_hash(payload: dict[str, Any]) -> str:
@@ -130,42 +255,78 @@ def resolve_restore_heads(width: int, *, selected_head: int, num_key_value_heads
 
 
 class PilotClassification(str, Enum):
-    CANDIDATE = "candidate_selection_implicated"
-    WIDTH = "restore_dilution_implicated"
-    BOTH = "candidate_and_width_implicated"
-    READOUT = "readout_implicated"
-    KILLED_15B = "mechanism_killed_at_1_5b"
-    MECHANICALLY_UNQUALIFIED = "mechanically_unqualified"
-    VOID = "void"
+    """The frozen R2 mechanism categories A through H.
 
+    Every member maps to exactly one lettered category in the R2 protocol
+    freeze.  The categories are evaluated in a fixed precedence order by
+    ``classify_pilot`` and never re-derived anywhere else.
+    """
+
+    CANDIDATE_WORKS = "current_candidate_works"  # A
+    CANDIDATE_RESCUE = "candidate_selection_rescue"  # B
+    WIDTH_RESCUE = "restore_width_rescue"  # C
+    INTERACTION = "candidate_width_interaction"  # D
+    READOUT_ONLY = "readout_only_movement"  # E
+    FLAT = "flat_bounded_diagnostic"  # F
+    MECHANICALLY_UNQUALIFIED = "mechanically_unqualified"  # G
+    VOID = "void"  # H
+
+
+CLASSIFICATION_LETTER: dict[PilotClassification, str] = {
+    PilotClassification.CANDIDATE_WORKS: "A",
+    PilotClassification.CANDIDATE_RESCUE: "B",
+    PilotClassification.WIDTH_RESCUE: "C",
+    PilotClassification.INTERACTION: "D",
+    PilotClassification.READOUT_ONLY: "E",
+    PilotClassification.FLAT: "F",
+    PilotClassification.MECHANICALLY_UNQUALIFIED: "G",
+    PilotClassification.VOID: "H",
+}
 
 CLASSIFICATION_TEXT: dict[PilotClassification, str] = {
-    PilotClassification.CANDIDATE: (
-        "DIAGNOSTIC PILOT INFORMATIVE —\nBOUNDED CANDIDATE UPPER BOUND MOVED;\n"
-        "CANDIDATE SELECTION IS A PLAUSIBLE BOTTLENECK;\nNO B2B AUTHORIZATION"
+    PilotClassification.CANDIDATE_WORKS: (
+        "DIAGNOSTIC PILOT R2 INFORMATIVE (A) —\n"
+        "A RANK-ZERO WIDTH-ONE RESTORE EXCEEDED 0.01 NATS;\n"
+        "THE RESTORATION MECHANISM EXISTS AT 1.5B UNDER THE CURRENT DEPLOYABLE CANDIDATE;\n"
+        "THE PREVIOUS 8B NULL MAY BE MODEL-, ROW-, EVENT- OR IMPLEMENTATION-REGIME DEPENDENT;\n"
+        "NO B2B AUTHORIZATION"
     ),
-    PilotClassification.WIDTH: (
-        "DIAGNOSTIC PILOT INFORMATIVE —\nALL-KV-HEAD RESTORE MOVED;\n"
-        "SINGLE-HEAD RESTORE IS TOO NARROW;\nNO B2B AUTHORIZATION"
+    PilotClassification.CANDIDATE_RESCUE: (
+        "DIAGNOSTIC PILOT R2 INFORMATIVE (B) —\n"
+        "A NON-RANK-ZERO WIDTH-ONE CANDIDATE EXCEEDED 0.01 NATS WHERE RANK ZERO DID NOT;\n"
+        "CANDIDATE SELECTION IS IMPLICATED;\nNO B2B AUTHORIZATION"
     ),
-    PilotClassification.BOTH: (
-        "DIAGNOSTIC PILOT INFORMATIVE —\nCANDIDATE CHOICE AND RESTORE WIDTH BOTH MOVED;\n"
-        "INTERACTION TEST REQUIRED BEFORE METHOD DESIGN;\nNO B2B AUTHORIZATION"
+    PilotClassification.WIDTH_RESCUE: (
+        "DIAGNOSTIC PILOT R2 INFORMATIVE (C) —\n"
+        "FOR THE SAME CANDIDATE, WIDTH TWO EXCEEDED 0.01 NATS WHERE WIDTH ONE DID NOT;\n"
+        "SINGLE-HEAD RESTORATION IS TOO NARROW;\nNO B2B AUTHORIZATION"
     ),
-    PilotClassification.READOUT: (
-        "DIAGNOSTIC PILOT INFORMATIVE —\nNLL GATE REMAINED FLAT BUT BEHAVIOURAL READOUT MOVED;\n"
-        "READOUT REQUIRES REDEFINITION BEFORE METHOD DESIGN;\nNO B2B AUTHORIZATION"
+    PilotClassification.INTERACTION: (
+        "DIAGNOSTIC PILOT R2 INFORMATIVE (D) —\n"
+        "ONLY A NON-RANK-ZERO WIDTH-TWO RESTORE EXCEEDED 0.01 NATS;\n"
+        "CANDIDATE CHOICE AND KV-HEAD WIDTH INTERACT;\nNO B2B AUTHORIZATION"
     ),
-    PilotClassification.KILLED_15B: (
-        "DIAGNOSTIC PILOT VALID —\nCANDIDATE UPPER BOUND, ALL-HEAD RESTORE, AND BEHAVIOURAL READOUT FLAT;\n"
-        "SINGLE-TOKEN KV RESTORE KILLED AT THE 1.5B OPERATING POINT;\nNO B2B"
+    PilotClassification.READOUT_ONLY: (
+        "DIAGNOSTIC PILOT R2 INFORMATIVE (E) —\n"
+        "NO GAIN EXCEEDED 0.01 NATS BUT A PREDECLARED BEHAVIOURAL READOUT CHANGED;\n"
+        "THE MEAN-NLL READOUT IS INSENSITIVE TO A BEHAVIOURAL RESPONSE;\n"
+        "NO B2B AUTHORIZATION"
+    ),
+    PilotClassification.FLAT: (
+        "DIAGNOSTIC PILOT R2 VALID (F) —\n"
+        "SINGLE-TOKEN, SINGLE-LAYER KV RESTORATION DID NOT MOVE UNDER THE FROZEN\n"
+        "CANDIDATE POOL, EVENT SELECTION, INTERVENTION TIME, DONOR CONSTRUCTION,\n"
+        "1.5B OPERATING POINT AND FIXED READOUTS;\n"
+        "THIS DOES NOT GENERALIZE TO THE 8B OPERATING POINT;\nNO B2B AUTHORIZATION"
     ),
     PilotClassification.MECHANICALLY_UNQUALIFIED: (
-        "DIAGNOSTIC PILOT MECHANICALLY UNQUALIFIED —\nFEWER THAN THREE VALID EXAMPLES;\n"
+        "DIAGNOSTIC PILOT R2 MECHANICALLY UNQUALIFIED (G) —\n"
+        "FEWER THAN THREE EXAMPLES QUALIFIED AFTER THE COMPLETE FIRST-EIGHT SCAN;\n"
         "NO SCIENTIFIC INTERPRETATION;\nNO RETRY UNDER THE CONSUMED AUTHORIZATION"
     ),
     PilotClassification.VOID: (
-        "DIAGNOSTIC PILOT VOID —\nNO-OP, EVIDENCE, BINDING, OR EXECUTION FAILURE;\n"
+        "DIAGNOSTIC PILOT R2 VOID (H) —\n"
+        "EXECUTION, EVIDENCE, NO-OP, BINDING OR RECONSTRUCTION FAILURE;\n"
         "NO SCIENTIFIC INTERPRETATION;\nNO RETRY UNDER THE CONSUMED AUTHORIZATION"
     ),
 }
@@ -174,27 +335,41 @@ CLASSIFICATION_TEXT: dict[PilotClassification, str] = {
 def classify_pilot(
     *,
     qualified_examples: int,
-    arm_a_gains: list[float],
-    arm_b_gains: list[float],
+    rank_zero_width_one_gains: list[float],
+    non_rank_zero_width_one_gains: list[float],
+    rank_zero_width_two_gains: list[float],
+    non_rank_zero_width_two_gains: list[float],
     behavioural_change: bool,
     noop_exact: bool,
     complete: bool,
 ) -> PilotClassification:
+    """Assign exactly one frozen R2 mechanism category.
+
+    Precedence is H, G, then A through F.  The width-two categories are
+    only reachable once every width-one cell has stayed at or below the
+    threshold, which is what makes C a same-candidate width rescue and D a
+    genuine candidate-by-width interaction rather than a relabelling of A
+    or B.
+    """
     if not noop_exact or not complete:
         return PilotClassification.VOID
     if qualified_examples < MAXIMUM_SELECTED_EXAMPLES:
         return PilotClassification.MECHANICALLY_UNQUALIFIED
-    a_moved = any(value > SWAP_GAIN_THRESHOLD_NATS for value in arm_a_gains)
-    b_moved = any(value > SWAP_GAIN_THRESHOLD_NATS for value in arm_b_gains)
-    if a_moved and b_moved:
-        return PilotClassification.BOTH
-    if a_moved:
-        return PilotClassification.CANDIDATE
-    if b_moved:
-        return PilotClassification.WIDTH
+
+    def moved(values: list[float]) -> bool:
+        return any(value > SWAP_GAIN_THRESHOLD_NATS for value in values)
+
+    if moved(rank_zero_width_one_gains):
+        return PilotClassification.CANDIDATE_WORKS
+    if moved(non_rank_zero_width_one_gains):
+        return PilotClassification.CANDIDATE_RESCUE
+    if moved(rank_zero_width_two_gains):
+        return PilotClassification.WIDTH_RESCUE
+    if moved(non_rank_zero_width_two_gains):
+        return PilotClassification.INTERACTION
     if behavioural_change:
-        return PilotClassification.READOUT
-    return PilotClassification.KILLED_15B
+        return PilotClassification.READOUT_ONLY
+    return PilotClassification.FLAT
 
 
 def margin_sign(value: float) -> Literal[-1, 0, 1]:

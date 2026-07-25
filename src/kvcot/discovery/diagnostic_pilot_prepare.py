@@ -20,8 +20,8 @@ from kvcot.discovery.diagnostic_pilot_contract import (
     MAXIMUM_SELECTED_EXAMPLES,
     MODEL_REPOSITORY,
     MODEL_REVISION,
-    PROTOCOL_DOCUMENT_PATH,
     PROTOCOL_SCHEMA_VERSION,
+    R1_GENERATION,
     RESTORE_WIDTHS,
     RKV_REVISION,
     RUNTIME_LIMIT_SECONDS,
@@ -31,7 +31,10 @@ from kvcot.discovery.diagnostic_pilot_contract import (
     TOKENIZER_REPOSITORY,
     TOKENIZER_REVISION,
     VRAM_LIMIT_BYTES,
+    DiagnosticGeneration,
     attach_canonical_hash,
+    generation_by_label,
+    generation_for_protocol_document_path,
     verify_canonical_hash,
 )
 from kvcot.discovery.discovery_config import (
@@ -45,8 +48,10 @@ from kvcot.discovery.manifest_prepare import render_with_loaded_tokenizer
 from kvcot.discovery.snapshot_boundary import resolve_local_snapshot
 from kvcot.utils.hashing import sha256_int_ids, sha256_json, sha256_text
 
-DEFAULT_RUNTIME_ROOT = Path("/workspace/faithkv-post-stage-c-diagnostic-runtime")
-DEFAULT_OUTPUT_ROOT = Path("/workspace/faithkv-post-stage-c-diagnostic-execution")
+#: Backward-compatible R1 defaults.  Callers that pass nothing continue to
+#: reproduce the consumed R1 runtime artifact byte-for-byte.
+DEFAULT_RUNTIME_ROOT = Path(R1_GENERATION.default_runtime_root)
+DEFAULT_OUTPUT_ROOT = Path(R1_GENERATION.default_output_root)
 
 
 class DiagnosticPreparationRefused(RuntimeError):
@@ -126,12 +131,48 @@ def _verify_candidate_prompt_bindings(
             )
 
 
+def _pair_budget_fields(generation: DiagnosticGeneration) -> dict[str, Any]:
+    """Generation-specific pair-budget vocabulary.
+
+    R1's field names are frozen so its already-written runtime artifact
+    keeps verifying byte-for-byte.  R2 records the bounded factorial grid's
+    pair budget under its own explicit names.
+    """
+    if generation is R1_GENERATION:
+        return {
+            "maximum_interventions_per_selected_example": (
+                generation.maximum_pairs_per_selected_example
+            ),
+            "maximum_total_interventions": generation.maximum_total_pairs,
+        }
+    return {
+        "maximum_pairs_per_selected_example": generation.maximum_pairs_per_selected_example,
+        "maximum_total_pairs": generation.maximum_total_pairs,
+    }
+
+
 def prepare_runtime_inputs(
-    *, repository_root: str | Path, runtime_root: str | Path = DEFAULT_RUNTIME_ROOT
+    *,
+    repository_root: str | Path,
+    runtime_root: str | Path = DEFAULT_RUNTIME_ROOT,
+    output_root: str | Path = DEFAULT_OUTPUT_ROOT,
+    generation: str = R1_GENERATION.label,
 ) -> dict[str, Any]:
-    """Prepare prompt identities and runtime binding without loading weights."""
+    """Prepare prompt identities and runtime binding without loading weights.
+
+    ``output_root`` is explicit so a new generation can bind its own
+    execution root, while the existing default keeps every prior caller
+    reproducing the R1 artifact unchanged.
+    """
     repository_root = Path(repository_root).resolve()
     runtime_root = Path(runtime_root).resolve()
+    output_root = Path(output_root)
+    if not output_root.is_absolute():
+        raise DiagnosticPreparationRefused("output root must be an absolute path")
+    output_root = output_root.resolve()
+    pilot_generation = generation_by_label(generation)
+    if runtime_root == output_root:
+        raise DiagnosticPreparationRefused("runtime root and output root must differ")
     candidate_manifest = _load_candidate_manifest(repository_root)
     config_path = repository_root / CONFIG_PATH
     config = load_discovery_config(config_path)
@@ -175,8 +216,10 @@ def prepare_runtime_inputs(
             "protocol_schema_version": PROTOCOL_SCHEMA_VERSION,
             "repository": "asad073-ui/Faithkv",
             "branch": BRANCH,
-            "protocol_document_path": PROTOCOL_DOCUMENT_PATH,
-            "protocol_document_sha256": sha256_file(repository_root / PROTOCOL_DOCUMENT_PATH),
+            "protocol_document_path": pilot_generation.protocol_document_path,
+            "protocol_document_sha256": sha256_file(
+                repository_root / pilot_generation.protocol_document_path
+            ),
             "config_path": CONFIG_PATH,
             "config_byte_sha256": sha256_file(config_path),
             "config_canonical_sha256": canonical_config_hash(config),
@@ -210,8 +253,7 @@ def prepare_runtime_inputs(
             "maximum_selected_events": MAXIMUM_SELECTED_EXAMPLES,
             "events_per_example": MAXIMUM_EVENTS_PER_EXAMPLE,
             "maximum_candidate_pool_size": MAXIMUM_CANDIDATE_POOL_SIZE,
-            "maximum_interventions_per_selected_example": MAXIMUM_CANDIDATE_POOL_SIZE + 2,
-            "maximum_total_interventions": MAXIMUM_SELECTED_EXAMPLES * (MAXIMUM_CANDIDATE_POOL_SIZE + 2),
+            **_pair_budget_fields(pilot_generation),
             "restore_widths": list(RESTORE_WIDTHS),
             "scored_horizon": SCORED_HORIZON,
             "swap_gain_threshold_nats": SWAP_GAIN_THRESHOLD_NATS,
@@ -219,18 +261,25 @@ def prepare_runtime_inputs(
             "vram_limit_bytes": VRAM_LIMIT_BYTES,
             "single_rtx3090": True,
             "cpu_offload": False,
-            "output_root": str(DEFAULT_OUTPUT_ROOT),
+            "output_root": str(output_root),
         }
     )
     runtime_path = runtime_root / "runtime_config.json"
     _write_new_or_identical(runtime_path, runtime_payload)
     return {
+        "generation": pilot_generation.label,
         "runtime_config_path": str(runtime_path),
         "runtime_config_canonical_sha256": runtime_payload["canonical_sha256"],
         "candidate_prompts_path": str(prompts_path),
         "candidate_prompts_canonical_sha256": prompt_payload["canonical_sha256"],
         "model_snapshot_path": model_snapshot.local_path,
         "tokenizer_snapshot_path": tokenizer_snapshot.local_path,
+        "protocol_document_path": pilot_generation.protocol_document_path,
+        "output_root": str(output_root),
+        "maximum_pairs_per_selected_example": (
+            pilot_generation.maximum_pairs_per_selected_example
+        ),
+        "maximum_total_pairs": pilot_generation.maximum_total_pairs,
     }
 
 
@@ -242,11 +291,28 @@ def verify_runtime_inputs(
     verify_canonical_hash(payload)
     if payload.get("artifact_schema_version") != RUNTIME_SCHEMA_VERSION:
         raise DiagnosticPreparationRefused("runtime-config schema mismatch")
+    protocol_document_path = payload.get("protocol_document_path")
+    if not isinstance(protocol_document_path, str):
+        raise DiagnosticPreparationRefused("runtime-config protocol document path is missing")
+    try:
+        pilot_generation = generation_for_protocol_document_path(protocol_document_path)
+    except ValueError as exc:
+        raise DiagnosticPreparationRefused(str(exc)) from exc
+    # The output root is bound by the artifact's own canonical hash.  It
+    # must be absolute so preflight can compare it exactly against the
+    # authorization, but it is deliberately not pinned to any single
+    # generation's default.
+    output_root = payload.get("output_root")
+    if not isinstance(output_root, str) or not output_root:
+        raise DiagnosticPreparationRefused("runtime-config output root must be a non-empty string")
+    if not Path(output_root).is_absolute():
+        raise DiagnosticPreparationRefused("runtime-config output root must be an absolute path")
+    if Path(output_root).resolve() != Path(output_root):
+        raise DiagnosticPreparationRefused("runtime-config output root must be canonical")
     expected = {
         "repository": "asad073-ui/Faithkv",
         "branch": BRANCH,
         "protocol_schema_version": PROTOCOL_SCHEMA_VERSION,
-        "protocol_document_path": PROTOCOL_DOCUMENT_PATH,
         "config_path": CONFIG_PATH,
         "candidate_manifest_path": CANDIDATE_MANIFEST_PATH,
         "model_repository": MODEL_REPOSITORY,
@@ -261,8 +327,7 @@ def verify_runtime_inputs(
         "maximum_selected_events": MAXIMUM_SELECTED_EXAMPLES,
         "events_per_example": MAXIMUM_EVENTS_PER_EXAMPLE,
         "maximum_candidate_pool_size": MAXIMUM_CANDIDATE_POOL_SIZE,
-        "maximum_interventions_per_selected_example": MAXIMUM_CANDIDATE_POOL_SIZE + 2,
-        "maximum_total_interventions": MAXIMUM_SELECTED_EXAMPLES * (MAXIMUM_CANDIDATE_POOL_SIZE + 2),
+        **_pair_budget_fields(pilot_generation),
         "restore_widths": list(RESTORE_WIDTHS),
         "scored_horizon": SCORED_HORIZON,
         "swap_gain_threshold_nats": SWAP_GAIN_THRESHOLD_NATS,
@@ -270,14 +335,13 @@ def verify_runtime_inputs(
         "vram_limit_bytes": VRAM_LIMIT_BYTES,
         "single_rtx3090": True,
         "cpu_offload": False,
-        "output_root": str(DEFAULT_OUTPUT_ROOT),
         "candidate_manifest_canonical_sha256": CANDIDATE_MANIFEST_CANONICAL_SHA256,
         "candidate_manifest_byte_sha256": CANDIDATE_MANIFEST_BYTE_SHA256,
     }
     for key, value in expected.items():
         if payload.get(key) != value:
             raise DiagnosticPreparationRefused(f"runtime-config field {key!r} does not match the protocol")
-    if sha256_file(repository_root / PROTOCOL_DOCUMENT_PATH) != payload.get(
+    if sha256_file(repository_root / pilot_generation.protocol_document_path) != payload.get(
         "protocol_document_sha256"
     ):
         raise DiagnosticPreparationRefused("runtime protocol hash differs from the checked-out document")

@@ -7,7 +7,7 @@ from kvcot.discovery.diagnostic_pilot_contract import (
 )
 from kvcot.discovery.diagnostic_pilot_manifest import (
     CandidateScore,
-    bounded_candidate_upper_bound,
+    bounded_local_candidate_maximum,
     choose_event_by_deployable_score,
     freeze_candidate_pool,
     mechanically_qualifies,
@@ -147,15 +147,17 @@ def test_candidate_pool_order_maximum_four_and_tie_breaking():
     assert pool.deployable_performance is False
 
 
-def test_candidate_upper_bound_reconstructs_from_primitive_gains():
+def test_bounded_local_candidate_maximum_reconstructs_from_primitive_gains():
     records = [
-        {"arm": "candidate_upper_bound", "diagnostic_only": True, "swap_gain": value}
+        {"arm": "restore", "diagnostic_only": True, "swap_gain": value}
         for value in (-0.2, 0.004, 0.03)
     ]
-    assert bounded_candidate_upper_bound(records) == 0.03
+    assert bounded_local_candidate_maximum(records) == 0.03
     records[0]["diagnostic_only"] = False
     with pytest.raises(ValueError, match="diagnostic"):
-        bounded_candidate_upper_bound(records)
+        bounded_local_candidate_maximum(records)
+    with pytest.raises(ValueError, match="at least one primitive pair"):
+        bounded_local_candidate_maximum([])
 
 
 def test_event_selection_is_score_then_index_and_outcome_blind():

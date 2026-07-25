@@ -13,11 +13,13 @@ from kvcot.discovery.diagnostic_pilot_contract import (
     BRANCH,
     CANDIDATE_MANIFEST_PATH,
     CONFIG_PATH,
-    EXACT_EXECUTION_COMMAND,
     MODEL_REVISION,
+    NOOP_ARM,
     PAIR_SCHEMA_VERSION,
-    PROTOCOL_DOCUMENT_PATH,
+    R1_GENERATION,
+    R2_GENERATION,
     REPOSITORY,
+    RESTORE_ARM,
     RKV_REVISION,
     TOKENIZER_REVISION,
     attach_canonical_hash,
@@ -81,15 +83,15 @@ def device_evidence():
     }
 
 
-def pair(arm, gain, *, margin=False, candidate=1, donor=9):
+def pair(arm, gain, *, width=1, rank=None, margin=False, candidate=1, donor=9):
     baseline = [1.0] * 48
     intervention = [1.0 - gain * 48] + [1.0] * 47
     baseline_mean = sum(baseline) / len(baseline)
     intervention_mean = sum(intervention) / len(intervention)
     before_margin = -0.5 if margin else 0.5
     after_margin = 0.5
-    kv_heads = [0, 1] if arm == "restore_width" else [0]
-    donor_slots = {"0": 3, **({"1": 4} if arm == "restore_width" else {})}
+    kv_heads = [0, 1] if width == 2 else [0]
+    donor_slots = {"0": 3, **({"1": 4} if width == 2 else {})}
 
     def margin_row(value):
         alternative_logp = -2.0
@@ -108,9 +110,11 @@ def pair(arm, gain, *, margin=False, candidate=1, donor=9):
     return {
         "artifact_schema_version": PAIR_SCHEMA_VERSION,
         "arm": arm,
-        "diagnostic_only": arm == "candidate_upper_bound",
+        "diagnostic_only": arm == RESTORE_ARM,
         "deployable_performance": False,
-        "restore_width": 2 if arm == "restore_width" else 1,
+        "restore_width": width,
+        "candidate_pool_rank": rank,
+        "is_rank_zero_candidate": rank == 0,
         "compaction_event_id": 2,
         "layer_index": 4,
         "selected_kv_head": 0,
@@ -145,14 +149,41 @@ def pair(arm, gain, *, margin=False, candidate=1, donor=9):
             "cache_shape_unchanged": True,
             "absolute_position_unchanged": True,
             "provenance_valid": True,
-            "key_slots_changed": 0 if arm == "no_op" else len(kv_heads),
-            "value_slots_changed": 0 if arm == "no_op" else len(kv_heads),
-            "is_noop": arm == "no_op",
+            "key_slots_changed": 0 if arm == NOOP_ARM else len(kv_heads),
+            "value_slots_changed": 0 if arm == NOOP_ARM else len(kv_heads),
+            "is_noop": arm == NOOP_ARM,
         },
     }
 
 
-def result(ordinal, *, a=0.0, b=0.0, margin=False, noop=True):
+#: Two-candidate frozen pool used by every synthetic example.
+POOL = [
+    {"absolute_token_position": 1, "deployable_score": 0.9},
+    {"absolute_token_position": 2, "deployable_score": 0.8},
+]
+
+
+def grid_pairs(gains, *, margin=False, donor=9):
+    """The complete rank-major candidate x width grid, then one no-op."""
+    records = []
+    for rank, candidate in enumerate(POOL):
+        for width in (1, 2):
+            records.append(
+                pair(
+                    RESTORE_ARM,
+                    gains.get((rank, width), 0.0),
+                    width=width,
+                    rank=rank,
+                    margin=margin and rank == 0 and width == 1,
+                    candidate=candidate["absolute_token_position"],
+                    donor=donor,
+                )
+            )
+    records.append(pair(NOOP_ARM, 0.0, width=1, rank=None, candidate=donor, donor=donor))
+    return records
+
+
+def result(ordinal, *, gains=None, margin=False, noop=True):
     payload = {
         "role": "diagnostic_rkv",
         "model_revision": MODEL_REVISION,
@@ -175,10 +206,7 @@ def result(ordinal, *, a=0.0, b=0.0, margin=False, noop=True):
             "selected_kv_head": 0,
             "deployable_event_score": 0.9,
             "donor_absolute_position": 9,
-            "candidate_pool": [
-                {"absolute_token_position": 1, "deployable_score": 0.9},
-                {"absolute_token_position": 2, "deployable_score": 0.8},
-            ],
+            "candidate_pool": [dict(row) for row in POOL],
             "candidate_pool_frozen_before_intervention": True,
             "candidate_pool_diagnostic_only": True,
         },
@@ -189,22 +217,14 @@ def result(ordinal, *, a=0.0, b=0.0, margin=False, noop=True):
                 "layer_index": 4,
                 "selected_kv_head": 0,
                 "deployable_event_score": 0.9,
-                "candidate_pool": [
-                    {"absolute_token_position": 1, "deployable_score": 0.9},
-                    {"absolute_token_position": 2, "deployable_score": 0.8},
-                ],
+                "candidate_pool": [dict(row) for row in POOL],
                 "captured_before_intervention": True,
                 "rank_zero_candidate_available_in_all_kv_heads": True,
             }
         ],
         "score_replay_retained_full_snapshots": 0,
         "selected_snapshot_count": 1,
-        "pair_records": [
-            pair("candidate_upper_bound", a, margin=margin, candidate=1),
-            pair("candidate_upper_bound", a / 2, candidate=2),
-            pair("restore_width", b, candidate=1),
-            pair("no_op", 0.0, candidate=9),
-        ],
+        "pair_records": grid_pairs(gains or {}, margin=margin),
         "noop_exact": noop,
         "qualified": True,
         "selected_event_replay_valid": True,
@@ -215,33 +235,71 @@ def result(ordinal, *, a=0.0, b=0.0, margin=False, noop=True):
         "fixed_trace_correctness_status": "correct",
         "free_running_answer_flip_available": False,
     }
-    for rank, candidate_pair in enumerate(payload["pair_records"][:2]):
-        candidate_pair["candidate_pool_rank"] = rank
-        candidate_pair["is_control_candidate"] = rank == 0
     return payload
 
 
 @pytest.mark.parametrize(
-    ("a", "b", "margin", "classification"),
+    ("gains", "margin", "classification"),
     [
-        (0.02, 0.0, False, "candidate_selection_implicated"),
-        (0.0, 0.02, False, "restore_dilution_implicated"),
-        (0.02, 0.02, False, "candidate_and_width_implicated"),
-        (0.0, 0.0, True, "readout_implicated"),
-        (0.0, 0.0, False, "mechanism_killed_at_1_5b"),
+        # A: the rank-zero width-one (current deployable) cell moved.
+        ({(0, 1): 0.02}, False, "current_candidate_works"),
+        # B: only a non-rank-zero width-one candidate moved.
+        ({(1, 1): 0.02}, False, "candidate_selection_rescue"),
+        # C: same candidate, width two moved where width one did not.
+        ({(0, 2): 0.02}, False, "restore_width_rescue"),
+        # D: only a non-rank-zero width-two cell moved.
+        ({(1, 2): 0.02}, False, "candidate_width_interaction"),
+        # E: flat NLL, moving behavioural readout.
+        ({}, True, "readout_only_movement"),
+        # F: flat bounded diagnostic.
+        ({}, False, "flat_bounded_diagnostic"),
     ],
 )
-def test_summary_reconstructs_every_scientific_outcome(a, b, margin, classification):
+def test_summary_reconstructs_every_scientific_outcome(gains, margin, classification):
     qualifications = [qualification(index) for index in range(3)]
-    results = [result(index, a=a, b=b, margin=margin) for index in range(3)]
+    results = [result(index, gains=gains, margin=margin) for index in range(3)]
     summary = _summarize(qualifications, results)
     assert summary["classification"] == classification
-    assert summary["completed_arm_a_pairs"] == 6
-    assert summary["completed_arm_b_pairs"] == 3
+    # Two pooled candidates x two widths x three examples, plus one no-op each.
+    assert summary["completed_width_one_pairs"] == 6
+    assert summary["completed_width_two_pairs"] == 6
+    assert summary["completed_restore_pairs"] == 12
     assert summary["completed_noop_pairs"] == 3
-    assert summary["completed_total_pairs"] == summary["expected_total_pairs"] == 12
+    assert summary["completed_total_pairs"] == summary["expected_total_pairs"] == 15
+    assert summary["maximum_pairs_per_selected_example"] == 9
+    assert summary["maximum_total_pairs"] == 27
+    assert summary["swap_gain_threshold_nats"] == 0.01
     assert summary["b2b_status"] == "blocked"
-    assert "does not confirm or refute" in summary["scale_limitation"]
+    assert "does not settle the 8B operating point" in summary["scale_limitation"]
+
+
+def test_summary_reports_the_complete_per_example_gain_matrix():
+    gains = {(0, 1): 0.05, (0, 2): 0.07, (1, 1): -0.01, (1, 2): 0.02}
+    results = [result(index, gains=gains) for index in range(3)]
+    summary = _summarize([qualification(index) for index in range(3)], results)
+    matrices = summary["per_example_gain_matrix"]
+    assert len(matrices) == 3
+    rows = matrices[0]["rows"]
+    assert [row["candidate_pool_rank"] for row in rows] == [0, 1]
+    assert [row["is_rank_zero_candidate"] for row in rows] == [True, False]
+    assert [row["candidate_absolute_position"] for row in rows] == [1, 2]
+    assert rows[0]["width_1_gain"] == pytest.approx(0.05)
+    assert rows[0]["width_2_gain"] == pytest.approx(0.07)
+    assert rows[0]["width_increment"] == pytest.approx(0.02)
+    assert rows[1]["width_increment"] == pytest.approx(0.03)
+    assert summary["best_rank_zero_width_one_gain"] == pytest.approx(0.05)
+    assert summary["best_rank_zero_width_two_gain"] == pytest.approx(0.07)
+    assert summary["best_non_rank_zero_width_one_gain"] == pytest.approx(-0.01)
+    assert summary["best_non_rank_zero_width_two_gain"] == pytest.approx(0.02)
+    assert summary["largest_gain_over_bounded_grid"] == pytest.approx(0.07)
+    assert summary["rank_zero_width_one_gains_above_0_01"] == 3
+    assert summary["rank_zero_width_two_gains_above_0_01"] == 3
+    assert summary["non_rank_zero_width_one_gains_above_0_01"] == 0
+    assert summary["non_rank_zero_width_two_gains_above_0_01"] == 3
+    assert summary["total_gains_above_0_01"] == 9
+    assert summary["noop_maximum_absolute_difference"] == 0.0
+    assert summary["classification"] == "current_candidate_works"
+    assert summary["classification_letter"] == "A"
 
 
 def test_noop_mismatch_voids_result():
@@ -252,13 +310,17 @@ def test_noop_mismatch_voids_result():
     assert summary["classification"] == "void"
 
 
-def test_arm_a_threshold_count_is_over_primitive_candidates_not_only_maxima():
+def test_threshold_counts_are_over_primitive_cells_not_only_bounded_maxima():
     summary = _summarize(
         [qualification(index) for index in range(3)],
-        [result(index, a=0.03) for index in range(3)],
+        [result(index, gains={(0, 1): 0.03, (1, 1): 0.02}) for index in range(3)],
     )
-    assert summary["arm_a_gains_above_0_01"] == 6
-    assert summary["arm_a_bounded_maxima_above_0_01"] == 3
+    # Six primitive width-one cells cross the threshold; the bounded local
+    # candidate maximum is one number per example.
+    assert summary["rank_zero_width_one_gains_above_0_01"] == 3
+    assert summary["non_rank_zero_width_one_gains_above_0_01"] == 3
+    assert summary["bounded_local_candidate_maxima_above_0_01"] == 3
+    assert len(summary["bounded_local_candidate_maxima"]) == 3
 
 
 def test_incomplete_pair_population_voids_result():
@@ -313,7 +375,80 @@ def test_incorrect_answer_token_margin_sign_change_is_not_arm_c_movement():
     summary = _summarize([qualification(index) for index in range(3)], results)
     assert summary["primitive_populations_reconstructed"] is True
     assert summary["behavioural_change"] is False
-    assert summary["classification"] == "mechanism_killed_at_1_5b"
+    assert summary["classification"] == "flat_bounded_diagnostic"
+    assert summary["classification_letter"] == "F"
+
+
+def zero_event_result(ordinal):
+    """A structurally valid worker record for a legitimate zero-event row."""
+    payload = result(ordinal)
+    payload["selected_event"] = None
+    payload["eligible_event_score_evidence"] = []
+    payload["selected_snapshot_count"] = 0
+    payload["pair_records"] = []
+    payload["noop_exact"] = None
+    payload["qualified"] = False
+    payload["qualification"] = zero_event_qualification(ordinal)
+    return payload
+
+
+def cap_hit_result(ordinal):
+    """R1's candidate 0 shape: eligible events existed but the cap was hit."""
+    payload = result(ordinal)
+    payload["rkv_natural_cap_hit"] = True
+    payload["pair_records"] = []
+    payload["noop_exact"] = None
+    payload["qualified"] = False
+    row = qualification(ordinal)
+    row["rkv_replay_mechanically_valid"] = False
+    row["rkv_natural_cap_hit"] = True
+    payload["qualification"] = row
+    return payload
+
+
+def zero_event_qualification(ordinal):
+    row = qualification(ordinal)
+    row.update(
+        {
+            "eligible_event_exists": False,
+            "selected_event_has_two_candidates": False,
+            "selected_event_count": 0,
+            "eligible_scored_event_count": 0,
+        }
+    )
+    return row
+
+
+def test_raw_binding_accepts_a_valid_unqualified_zero_event_worker_record():
+    rkv = zero_event_result(0)
+    fullkv = fullkv_result(0)
+    assert _raw_worker_binding_valid(fullkv, rkv) is True
+    # A zero-event record that nevertheless carries interventions is not a
+    # clean non-qualifier and must fail the binding.
+    rkv["pair_records"] = [pair(RESTORE_ARM, 0.0, width=1, rank=0)]
+    assert _raw_worker_binding_valid(fullkv, rkv) is False
+
+
+def fullkv_result(ordinal):
+    return {
+        "candidate_ordinal": ordinal,
+        "role": "fullkv",
+        "model_revision": MODEL_REVISION,
+        "tokenizer_revision": TOKENIZER_REVISION,
+        "dataset_repo": "synthetic-dataset",
+        "dataset_revision": "synthetic-revision",
+        "manifest_hash": "1" * 64,
+        "prompt_token_ids_sha256": "2" * 64,
+        "prompt_token_count": 10,
+        "dataset_row_identity": {"unique_id": f"row-{ordinal}"},
+        "natural_answer_status": "correct",
+        "cap_hit": False,
+        "actual_batch_size_verified": True,
+        "parameter_placement": placement_evidence(),
+        "device_evidence": device_evidence(),
+        "peak_cuda_allocated_bytes": 10,
+        "peak_cuda_reserved_bytes": 20,
+    }
 
 
 def test_fullkv_rkv_raw_binding_is_reconstructed_from_primitives():
@@ -392,59 +527,72 @@ def test_fewer_than_three_qualified_is_mechanically_unqualified():
     assert summary["classification"] == "mechanically_unqualified"
 
 
-def write_authorization(tmp_path):
+def write_authorization(tmp_path, *, generation=R2_GENERATION, **overrides):
+    """A synthetic authorization living at its generation's frozen path."""
     repository = tmp_path / "repository"
-    document = repository / "docs" / "authorization.md"
-    document.parent.mkdir(parents=True)
+    document = repository / generation.authorization_document_path
+    document.parent.mkdir(parents=True, exist_ok=True)
     claim = tmp_path / "claim.json"
     output_root = tmp_path / "execution"
     audit = tmp_path / "implementation-audit.md"
     audit.write_text("PASS synthetic audit\n", encoding="utf-8")
     source_root = Path(__file__).resolve().parents[3]
-    for relative_path in (PROTOCOL_DOCUMENT_PATH, CONFIG_PATH, CANDIDATE_MANIFEST_PATH):
+    for relative_path in (
+        generation.protocol_document_path,
+        CONFIG_PATH,
+        CANDIDATE_MANIFEST_PATH,
+    ):
         source = source_root / relative_path
         destination = repository / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(source.read_bytes())
-    protocol_sha256 = sha256_file(repository / PROTOCOL_DOCUMENT_PATH)
-    payload = attach_canonical_hash(
-        {
-            "authorization_id": "synthetic-coordinator",
-            "repository": REPOSITORY,
-            "authorized_branch": BRANCH,
-            "authorized_implementation_sha": "a" * 40,
-            "model_revision": MODEL_REVISION,
-            "tokenizer_revision": TOKENIZER_REVISION,
-            "rkv_revision": RKV_REVISION,
-            "maximum_invocations": 1,
-            "automatic_retries": 0,
-            "claim_path": str(claim),
-            "runtime_config_path": str(tmp_path / "runtime.json"),
-            "runtime_config_canonical_sha256": "b" * 64,
-            "protocol_document_sha256": protocol_sha256,
-            "candidate_manifest_canonical_sha256": (
-                "b8148647698ca5ab5335ea28dc1416109b26f73dd05b87eed2fe9eca4b25ff42"
-            ),
-            "output_root": str(output_root),
-            "implementation_audit_path": str(audit),
-            "implementation_audit_sha256": sha256_file(audit),
-            "implementation_audit_verdict": "PASS",
-            "maximum_qualification_candidates": 8,
-            "maximum_selected_examples": 3,
-            "maximum_selected_events": 3,
-            "events_per_example": 1,
-            "maximum_candidate_pool_size": 4,
-            "maximum_interventions_per_selected_example": 6,
-            "kv_restore_widths": [1, 2],
-            "single_rtx3090": True,
-            "cpu_offload": False,
-            "vram_limit_bytes": 22 * 1024**3,
-            "runtime_limit_seconds": 5_400,
-            "exact_command": EXACT_EXECUTION_COMMAND,
+    protocol_sha256 = sha256_file(repository / generation.protocol_document_path)
+    pair_budget = (
+        {"maximum_interventions_per_selected_example": 6}
+        if generation is R1_GENERATION
+        else {
+            "maximum_pairs_per_selected_example": 9,
+            "maximum_total_pairs": 27,
         }
     )
+    payload = {
+        "authorization_id": "synthetic-coordinator",
+        "repository": REPOSITORY,
+        "authorized_branch": BRANCH,
+        "authorized_implementation_sha": "a" * 40,
+        "model_revision": MODEL_REVISION,
+        "tokenizer_revision": TOKENIZER_REVISION,
+        "rkv_revision": RKV_REVISION,
+        "maximum_invocations": 1,
+        "automatic_retries": 0,
+        "claim_path": str(claim),
+        "runtime_config_path": str(tmp_path / "runtime.json"),
+        "runtime_config_canonical_sha256": "b" * 64,
+        "protocol_document_sha256": protocol_sha256,
+        "candidate_manifest_canonical_sha256": (
+            "b8148647698ca5ab5335ea28dc1416109b26f73dd05b87eed2fe9eca4b25ff42"
+        ),
+        "output_root": str(output_root),
+        "implementation_audit_path": str(audit),
+        "implementation_audit_sha256": sha256_file(audit),
+        "implementation_audit_verdict": "PASS",
+        "maximum_qualification_candidates": 8,
+        "maximum_selected_examples": 3,
+        "maximum_selected_events": 3,
+        "events_per_example": 1,
+        "maximum_candidate_pool_size": 4,
+        **pair_budget,
+        "kv_restore_widths": [1, 2],
+        "single_rtx3090": True,
+        "cpu_offload": False,
+        "vram_limit_bytes": 22 * 1024**3,
+        "runtime_limit_seconds": 5_400,
+        "exact_command": generation.exact_execution_command,
+    }
+    payload.update(overrides)
     document.write_text(
-        f"{AUTHORIZATION_JSON_BEGIN}\n{json.dumps(payload)}\n{AUTHORIZATION_JSON_END}\n",
+        f"{AUTHORIZATION_JSON_BEGIN}\n{json.dumps(attach_canonical_hash(payload))}\n"
+        f"{AUTHORIZATION_JSON_END}\n",
         encoding="utf-8",
     )
     return repository, document, claim, output_root
@@ -456,7 +604,10 @@ def test_dry_run_is_non_consuming_and_requests_no_cuda_or_weights(tmp_path, monk
         "kvcot.discovery.diagnostic_pilot_execute.verify_runtime_inputs",
         lambda _path, **_kwargs: {
             "canonical_sha256": "b" * 64,
-            "protocol_document_sha256": sha256_file(repository / PROTOCOL_DOCUMENT_PATH),
+            "protocol_document_path": R2_GENERATION.protocol_document_path,
+            "protocol_document_sha256": sha256_file(
+                repository / R2_GENERATION.protocol_document_path
+            ),
             "config_byte_sha256": sha256_file(repository / CONFIG_PATH),
             "model_snapshot_path": "/exact/model",
             "tokenizer_snapshot_path": "/exact/tokenizer",
@@ -477,7 +628,7 @@ def test_dry_run_is_non_consuming_and_requests_no_cuda_or_weights(tmp_path, monk
         if command == ("status", "--porcelain=v1", "--untracked-files=all"):
             return ""
         if command == ("diff", "--name-only", "HEAD^", "HEAD"):
-            return "docs/authorization.md"
+            return R2_GENERATION.authorization_document_path
         raise AssertionError(command)
 
     monkeypatch.setattr("kvcot.discovery.diagnostic_pilot_execute._git", fake_git)
@@ -500,7 +651,10 @@ def test_fake_worker_coordinator_writes_reconstructable_immutable_attempt(tmp_pa
     monkeypatch.setattr(
         "kvcot.discovery.diagnostic_pilot_execute.verify_runtime_inputs",
         lambda _path, **_kwargs: {
-            "protocol_document_sha256": sha256_file(repository / PROTOCOL_DOCUMENT_PATH),
+            "protocol_document_path": R2_GENERATION.protocol_document_path,
+            "protocol_document_sha256": sha256_file(
+                repository / R2_GENERATION.protocol_document_path
+            ),
             "canonical_sha256": "b" * 64,
             "candidate_prompts_path": str(tmp_path / "prompts.json"),
         },
@@ -549,9 +703,17 @@ def test_fake_worker_coordinator_writes_reconstructable_immutable_attempt(tmp_pa
     assert claim.exists()
     assert report["retry_allowed"] is False
     assert verify_attempt(attempt)["verified"] is True
-    assert json.loads((attempt / "scientific_summary.json").read_text())["classification"] == (
-        "mechanism_killed_at_1_5b"
-    )
+    summary = json.loads((attempt / "scientific_summary.json").read_text())
+    assert summary["classification"] == "flat_bounded_diagnostic"
+    assert summary["completed_width_one_pairs"] == 6
+    assert summary["completed_width_two_pairs"] == 6
+    assert summary["completed_noop_pairs"] == 3
+    binding = json.loads((attempt / "protocol_binding.json").read_text())
+    assert binding["generation"] == "r2"
+    assert binding["maximum_pairs_per_selected_example"] == 9
+    assert binding["maximum_total_pairs"] == 27
+    invocation = json.loads((attempt / "invocation.json").read_text())
+    assert invocation["command"] == R2_GENERATION.exact_execution_command
     completion = json.loads((attempt / "completion.json").read_text())
     assert completion["peak_cuda_allocated_bytes"] == 10
     assert completion["peak_cuda_reserved_bytes"] == 20
@@ -569,6 +731,142 @@ def test_fake_worker_coordinator_writes_reconstructable_immutable_attempt(tmp_pa
     final_path.write_text(json.dumps(final, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     with pytest.raises(Exception, match="claim canonical hash mismatch"):
         verify_attempt(attempt)
+
+
+def coordinator_harness(tmp_path, monkeypatch, repository, rkv_for_ordinal):
+    """Wire a fake-worker coordinator run over the first-eight scan."""
+    monkeypatch.setattr(
+        "kvcot.discovery.diagnostic_pilot_execute._preflight",
+        lambda *_args: {"passed": True, "would_initialize_cuda": False},
+    )
+    monkeypatch.setattr(
+        "kvcot.discovery.diagnostic_pilot_execute.verify_runtime_inputs",
+        lambda _path, **_kwargs: {
+            "protocol_document_path": R2_GENERATION.protocol_document_path,
+            "protocol_document_sha256": sha256_file(
+                repository / R2_GENERATION.protocol_document_path
+            ),
+            "canonical_sha256": "b" * 64,
+            "candidate_prompts_path": str(tmp_path / "prompts.json"),
+        },
+    )
+    launched = []
+
+    def fake_launch(*, role, ordinal, output, **_kwargs):
+        launched.append((role, ordinal))
+        if role == "fullkv":
+            payload = fullkv_result(ordinal)
+        else:
+            payload = rkv_for_ordinal(ordinal)
+            payload.setdefault("qualification", qualification(ordinal))
+            payload.update(
+                {
+                    "fixed_trace_extracted_answer": "1",
+                    "fixed_trace_correctness_status": "correct",
+                    "peak_cuda_allocated_bytes": 10,
+                    "peak_cuda_reserved_bytes": 20,
+                }
+            )
+        atomic_write_json(output, payload)
+        return payload
+
+    monkeypatch.setattr("kvcot.discovery.diagnostic_pilot_execute._launch_worker", fake_launch)
+    return launched
+
+
+def test_coordinator_continues_past_a_zero_event_row_and_selects_later_candidates(
+    tmp_path, monkeypatch
+):
+    """The exact R1 production failure, end to end.
+
+    R1 raised `qualification requires exactly one selected event` on
+    candidate 1 and never reached candidate 2.
+    """
+    repository, document, _claim, _output_root = write_authorization(tmp_path)
+
+    def rkv_for_ordinal(ordinal):
+        if ordinal == 0:
+            return cap_hit_result(ordinal)
+        if ordinal == 1:
+            return zero_event_result(ordinal)
+        return result(ordinal)
+
+    launched = coordinator_harness(tmp_path, monkeypatch, repository, rkv_for_ordinal)
+    report = run_diagnostic_pilot(
+        repository_root=repository, authorization_document=document
+    )
+    attempt = Path(report["attempt_directory"])
+    summary = json.loads((attempt / "scientific_summary.json").read_text())
+    assert summary["selected_candidate_ordinals"] == [2, 3, 4]
+    assert summary["qualified_example_count"] == 3
+    assert summary["classification"] == "flat_bounded_diagnostic"
+    # The scan visited candidates 0 through 4 and stopped once three
+    # examples qualified -- it never aborted on the zero-event row.
+    assert [ordinal for role, ordinal in launched if role == "fullkv"] == [0, 1, 2, 3, 4]
+    assert verify_attempt(attempt)["verified"] is True
+
+
+def test_eight_zero_event_rows_write_a_mechanically_unqualified_result(
+    tmp_path, monkeypatch
+):
+    repository, document, _claim, _output_root = write_authorization(tmp_path)
+    launched = coordinator_harness(tmp_path, monkeypatch, repository, zero_event_result)
+    report = run_diagnostic_pilot(
+        repository_root=repository, authorization_document=document
+    )
+    attempt = Path(report["attempt_directory"])
+    # A valid mechanically-unqualified result, not a failure artifact.
+    assert not (attempt / "failure.json").exists()
+    summary = json.loads((attempt / "scientific_summary.json").read_text())
+    assert summary["classification"] == "mechanically_unqualified"
+    assert summary["classification_letter"] == "G"
+    assert summary["qualified_example_count"] == 0
+    assert summary["completed_total_pairs"] == 0
+    assert "NO SCIENTIFIC INTERPRETATION" in summary["classification_text"]
+    assert [ordinal for role, ordinal in launched if role == "fullkv"] == list(range(8))
+    assert json.loads((attempt / "completion.json").read_text())["completed"] is True
+    assert verify_attempt(attempt)["verified"] is True
+
+
+def test_fewer_than_three_qualified_rows_are_mechanically_unqualified_not_a_failure(
+    tmp_path, monkeypatch
+):
+    repository, document, _claim, _output_root = write_authorization(tmp_path)
+
+    def rkv_for_ordinal(ordinal):
+        return result(ordinal) if ordinal < 2 else zero_event_result(ordinal)
+
+    coordinator_harness(tmp_path, monkeypatch, repository, rkv_for_ordinal)
+    report = run_diagnostic_pilot(
+        repository_root=repository, authorization_document=document
+    )
+    attempt = Path(report["attempt_directory"])
+    assert not (attempt / "failure.json").exists()
+    summary = json.loads((attempt / "scientific_summary.json").read_text())
+    assert summary["classification"] == "mechanically_unqualified"
+    assert summary["qualified_example_count"] == 2
+    assert verify_attempt(attempt)["verified"] is True
+
+
+def test_consumed_r1_authorization_can_never_be_executed_again(tmp_path, monkeypatch):
+    repository, document, claim, _output_root = write_authorization(
+        tmp_path, generation=R1_GENERATION
+    )
+    monkeypatch.setattr(
+        "kvcot.discovery.diagnostic_pilot_execute.verify_runtime_inputs",
+        lambda _path, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("must refuse before touching runtime inputs")
+        ),
+    )
+    with pytest.raises(DiagnosticExecutionRefused, match="not executable by this"):
+        dry_run_diagnostic_pilot(
+            repository_root=repository, authorization_document=document
+        )
+    with pytest.raises(DiagnosticExecutionRefused, match="not executable by this"):
+        run_diagnostic_pilot(
+            repository_root=repository, authorization_document=document
+        )
+    assert not claim.exists()
 
 
 def test_post_claim_setup_failure_is_preserved_inside_attempt(tmp_path, monkeypatch):
@@ -618,6 +916,7 @@ def test_every_post_claim_setup_boundary_preserves_failure(
     monkeypatch.setattr(
         "kvcot.discovery.diagnostic_pilot_execute.verify_runtime_inputs",
         lambda _path, **_kwargs: {
+            "protocol_document_path": R2_GENERATION.protocol_document_path,
             "protocol_document_sha256": "c" * 64,
             "canonical_sha256": "b" * 64,
             "candidate_prompts_path": str(tmp_path / "prompts.json"),

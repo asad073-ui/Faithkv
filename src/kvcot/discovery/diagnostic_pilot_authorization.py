@@ -15,19 +15,23 @@ from kvcot.discovery.diagnostic_pilot_contract import (
     BRANCH,
     CLAIM_SCHEMA_VERSION,
     CANDIDATE_MANIFEST_CANONICAL_SHA256,
-    EXACT_EXECUTION_COMMAND,
+    GENERATIONS,
     MAXIMUM_CANDIDATE_POOL_SIZE,
     MAXIMUM_INVOCATIONS,
     MAXIMUM_QUALIFICATION_CANDIDATES,
     MAXIMUM_SELECTED_EXAMPLES,
     MODEL_REVISION,
+    R1_GENERATION,
     REPOSITORY,
     RESTORE_WIDTHS,
     RKV_REVISION,
     RUNTIME_LIMIT_SECONDS,
     TOKENIZER_REVISION,
     VRAM_LIMIT_BYTES,
+    DiagnosticGeneration,
     attach_canonical_hash,
+    execution_command_document_argument,
+    generation_for_authorization_document,
     verify_canonical_hash,
 )
 
@@ -48,10 +52,69 @@ class VerifiedDiagnosticAuthorization:
     document_path: Path
     document_sha256: str
     payload: dict[str, Any]
+    generation: DiagnosticGeneration = R1_GENERATION
+
+
+def _pair_budget_requirements(generation: DiagnosticGeneration) -> dict[str, Any]:
+    """Generation-specific authorized pair budget.
+
+    R1's already-signed authorization keeps its original field name; R2
+    binds the bounded factorial grid's per-example and total pair maxima
+    explicitly.
+    """
+    if generation is R1_GENERATION:
+        return {
+            "maximum_interventions_per_selected_example": (
+                generation.maximum_pairs_per_selected_example
+            ),
+        }
+    return {
+        "maximum_pairs_per_selected_example": generation.maximum_pairs_per_selected_example,
+        "maximum_total_pairs": generation.maximum_total_pairs,
+    }
+
+
+def _within(child: Path, parent: Path) -> bool:
+    return child == parent or parent in child.parents
+
+
+def _assert_no_cross_generation_collision(
+    generation: DiagnosticGeneration, payload: dict[str, Any]
+) -> None:
+    """Refuse any authorization that could write into another generation.
+
+    The consumed R1 claim, output root, and runtime root are immutable
+    evidence.  A later generation must never be able to name, nest under,
+    or contain them.
+    """
+    output_root = Path(payload["output_root"]).resolve()
+    claim_path = Path(payload["claim_path"]).resolve()
+    runtime_config_path = Path(payload["runtime_config_path"]).resolve()
+    for other in GENERATIONS:
+        if other is generation:
+            continue
+        other_output = Path(other.default_output_root)
+        other_runtime = Path(other.default_runtime_root)
+        if _within(output_root, other_output) or _within(other_output, output_root):
+            raise DiagnosticAuthorizationRefused(
+                f"output root collides with the {other.label} output root"
+            )
+        if _within(claim_path, other_output):
+            raise DiagnosticAuthorizationRefused(
+                f"claim path collides with the {other.label} output root"
+            )
+        if _within(runtime_config_path, other_runtime):
+            raise DiagnosticAuthorizationRefused(
+                f"runtime config path collides with the {other.label} runtime root"
+            )
 
 
 def parse_authorization_document(path: str | Path) -> VerifiedDiagnosticAuthorization:
     document_path = Path(path).resolve()
+    try:
+        generation = generation_for_authorization_document(document_path)
+    except ValueError as exc:
+        raise DiagnosticAuthorizationRefused(str(exc)) from exc
     text = document_path.read_text(encoding="utf-8")
     if text.count(AUTHORIZATION_JSON_BEGIN) != 1 or text.count(AUTHORIZATION_JSON_END) != 1:
         raise DiagnosticAuthorizationRefused("authorization document must contain exactly one bounded JSON payload")
@@ -76,19 +139,32 @@ def parse_authorization_document(path: str | Path) -> VerifiedDiagnosticAuthoriz
         "maximum_selected_events": MAXIMUM_SELECTED_EXAMPLES,
         "events_per_example": 1,
         "maximum_candidate_pool_size": MAXIMUM_CANDIDATE_POOL_SIZE,
-        "maximum_interventions_per_selected_example": MAXIMUM_CANDIDATE_POOL_SIZE + 2,
+        **_pair_budget_requirements(generation),
         "kv_restore_widths": list(RESTORE_WIDTHS),
         "single_rtx3090": True,
         "cpu_offload": False,
         "vram_limit_bytes": VRAM_LIMIT_BYTES,
         "runtime_limit_seconds": RUNTIME_LIMIT_SECONDS,
-        "exact_command": EXACT_EXECUTION_COMMAND,
+        "exact_command": generation.exact_execution_command,
         "candidate_manifest_canonical_sha256": CANDIDATE_MANIFEST_CANONICAL_SHA256,
         "implementation_audit_verdict": "PASS",
     }
     for key, expected in required.items():
         if payload.get(key) != expected:
             raise DiagnosticAuthorizationRefused(f"authorization {key} does not match the frozen value")
+    # The authorized command must name the very document being parsed, so a
+    # valid command can never be lifted into a differently-located document.
+    try:
+        command_document = execution_command_document_argument(payload["exact_command"])
+    except ValueError as exc:
+        raise DiagnosticAuthorizationRefused(str(exc)) from exc
+    if command_document != generation.authorization_document_path or not (
+        document_path.as_posix() == command_document
+        or document_path.as_posix().endswith(f"/{command_document}")
+    ):
+        raise DiagnosticAuthorizationRefused(
+            "authorized command does not refer to the authorization document being parsed"
+        )
     for key in (
         "authorized_implementation_sha",
         "protocol_document_sha256",
@@ -111,12 +187,15 @@ def parse_authorization_document(path: str | Path) -> VerifiedDiagnosticAuthoriz
     for key in ("claim_path", "runtime_config_path", "output_root", "implementation_audit_path"):
         if not Path(payload[key]).is_absolute():
             raise DiagnosticAuthorizationRefused(f"authorization {key} must be an absolute path")
+    _assert_no_cross_generation_collision(generation, payload)
     audit_path = Path(payload["implementation_audit_path"])
     if not audit_path.is_file():
         raise DiagnosticAuthorizationRefused("bound implementation audit file is absent")
     if sha256_file(audit_path) != payload["implementation_audit_sha256"]:
         raise DiagnosticAuthorizationRefused("bound implementation audit file hash mismatch")
-    return VerifiedDiagnosticAuthorization(document_path, sha256_file(document_path), payload)
+    return VerifiedDiagnosticAuthorization(
+        document_path, sha256_file(document_path), payload, generation
+    )
 
 
 def claim_authorization_once(

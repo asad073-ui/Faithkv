@@ -25,25 +25,34 @@ from kvcot.discovery.diagnostic_pilot_contract import (
     CANDIDATE_MANIFEST_CANONICAL_SHA256,
     CANDIDATE_MANIFEST_PATH,
     CONFIG_PATH,
-    EXACT_EXECUTION_COMMAND,
+    EXECUTING_GENERATION,
     MAXIMUM_CANDIDATE_POOL_SIZE,
+    MAXIMUM_PAIRS_PER_SELECTED_EXAMPLE,
     MAXIMUM_QUALIFICATION_CANDIDATES,
     MAXIMUM_SELECTED_EXAMPLES,
+    MAXIMUM_TOTAL_PAIRS,
     MODEL_REVISION,
+    NOOP_ARM,
     PAIR_SCHEMA_VERSION,
-    PROTOCOL_DOCUMENT_PATH,
+    PILOT_ARMS,
+    RESTORE_ARM,
+    RESTORE_WIDTHS,
     RKV_REVISION,
     RUNTIME_LIMIT_SECONDS,
+    SUMMARY_SCHEMA_VERSION,
     SWAP_GAIN_THRESHOLD_NATS,
     TOKENIZER_REVISION,
     VRAM_LIMIT_BYTES,
+    CLASSIFICATION_LETTER,
     CLASSIFICATION_TEXT,
     attach_canonical_hash,
     classify_pilot,
+    generation_for_authorization_document,
+    generation_for_protocol_document_path,
     material_margin_change,
 )
 from kvcot.discovery.diagnostic_pilot_manifest import (
-    bounded_candidate_upper_bound,
+    bounded_local_candidate_maximum,
     mechanically_qualifies,
     select_first_three_qualified,
 )
@@ -65,9 +74,23 @@ def _git(repository_root: Path, *args: str) -> str:
 
 def _preflight(repository_root: Path, authorization: Any) -> dict[str, Any]:
     payload = authorization.payload
+    generation = generation_for_authorization_document(authorization.document_path)
+    if generation is not EXECUTING_GENERATION:
+        # The consumed R1 authorization stays permanently parseable and
+        # verifiable, but this implementation executes only the R2 grid and
+        # must never re-enter a superseded generation's execution path.
+        raise DiagnosticExecutionRefused(
+            f"authorization generation {generation.label!r} is not executable by this "
+            f"implementation; only {EXECUTING_GENERATION.label!r} may execute"
+        )
     runtime = verify_runtime_inputs(
         payload["runtime_config_path"], repository_root=repository_root
     )
+    runtime_generation = generation_for_protocol_document_path(runtime["protocol_document_path"])
+    if runtime_generation is not generation:
+        raise DiagnosticExecutionRefused(
+            "runtime protocol document belongs to a different diagnostic-pilot generation"
+        )
     head = _git(repository_root, "rev-parse", "HEAD")
     remote_head = _git(repository_root, "rev-parse", f"origin/{BRANCH}")
     branch = _git(repository_root, "branch", "--show-current")
@@ -94,7 +117,7 @@ def _preflight(repository_root: Path, authorization: Any) -> dict[str, Any]:
         raise DiagnosticExecutionRefused("authorization output root differs from runtime binding")
     if runtime["protocol_document_sha256"] != payload["protocol_document_sha256"]:
         raise DiagnosticExecutionRefused("protocol document hash mismatch")
-    if sha256_file(repository_root / PROTOCOL_DOCUMENT_PATH) != runtime[
+    if sha256_file(repository_root / generation.protocol_document_path) != runtime[
         "protocol_document_sha256"
     ]:
         raise DiagnosticExecutionRefused("checked-out protocol document differs from runtime binding")
@@ -131,6 +154,11 @@ def _preflight(repository_root: Path, authorization: Any) -> dict[str, Any]:
         "tokenizer_snapshot_path": runtime["tokenizer_snapshot_path"],
         "claim_absent": True,
         "attempt_absent": True,
+        "generation": generation.label,
+        "protocol_document_path": generation.protocol_document_path,
+        "output_root": runtime["output_root"],
+        "maximum_pairs_per_selected_example": generation.maximum_pairs_per_selected_example,
+        "maximum_total_pairs": generation.maximum_total_pairs,
         "would_initialize_cuda": False,
         "would_load_model_weights": False,
         "would_consume_claim": False,
@@ -303,45 +331,54 @@ def _pair_population_valid(result: dict[str, Any]) -> bool:
         return False
     pool_positions = [row.get("absolute_token_position") for row in pool]
     pairs = result.get("pair_records") or []
-    if any(pair.get("arm") not in {"candidate_upper_bound", "restore_width", "no_op"} for pair in pairs):
+    if any(pair.get("arm") not in set(PILOT_ARMS) for pair in pairs):
         return False
-    arm_a = [pair for pair in pairs if pair.get("arm") == "candidate_upper_bound"]
-    arm_b = [pair for pair in pairs if pair.get("arm") == "restore_width"]
-    noop = [pair for pair in pairs if pair.get("arm") == "no_op"]
-    if [pair.get("candidate_absolute_position") for pair in arm_a] != pool_positions:
+    if not pool_positions:
         return False
-    if [pair.get("candidate_pool_rank") for pair in arm_a] != list(range(len(pool_positions))):
+    selected_head = selected_event.get("selected_kv_head")
+    # The complete bounded factorial grid, rank-major, then exactly one
+    # no-op.  Both the population and its order are reconstructed here from
+    # the frozen pool rather than trusted from the worker.
+    expected_grid = [
+        (rank, position, width)
+        for rank, position in enumerate(pool_positions)
+        for width in RESTORE_WIDTHS
+    ]
+    if len(pairs) != len(expected_grid) + 1:
         return False
-    if [pair.get("is_control_candidate") for pair in arm_a] != [
-        index == 0 for index in range(len(pool_positions))
-    ]:
+    if len(pairs) > MAXIMUM_PAIRS_PER_SELECTED_EXAMPLE:
         return False
-    if len(arm_b) != 1 or len(noop) != 1 or not pool_positions:
+    restore_pairs = pairs[: len(expected_grid)]
+    noop_pairs = pairs[len(expected_grid) :]
+    if len(noop_pairs) != 1:
         return False
-    if arm_b[0].get("candidate_absolute_position") != pool_positions[0]:
+    if any(pair.get("arm") != RESTORE_ARM for pair in restore_pairs):
         return False
-    if arm_b[0].get("restore_width") != 2 or arm_b[0].get("kv_head_indices") != [0, 1]:
+    if noop_pairs[0].get("arm") != NOOP_ARM:
         return False
-    if any(
-        pair.get("restore_width") != 1
-        or pair.get("kv_head_indices") != [selected_event.get("selected_kv_head")]
-        or pair.get("diagnostic_only") is not True
-        or pair.get("deployable_performance") is not False
-        for pair in arm_a
-    ):
-        return False
-    if arm_b[0].get("diagnostic_only") is not False or arm_b[0].get(
-        "deployable_performance"
-    ) is not False:
-        return False
+    for pair, (rank, position, width) in zip(restore_pairs, expected_grid):
+        expected_heads = [selected_head] if width == 1 else [0, 1]
+        if (
+            pair.get("candidate_pool_rank") != rank
+            or pair.get("is_rank_zero_candidate") is not (rank == 0)
+            or pair.get("candidate_absolute_position") != position
+            or pair.get("restore_width") != width
+            or pair.get("kv_head_indices") != expected_heads
+            or pair.get("diagnostic_only") is not True
+            or pair.get("deployable_performance") is not False
+        ):
+            return False
+    noop = noop_pairs[0]
     donor = selected_event.get("donor_absolute_position")
-    if noop[0].get("candidate_absolute_position") != donor or noop[0].get("donor_absolute_position") != donor:
+    if noop.get("candidate_absolute_position") != donor or noop.get("donor_absolute_position") != donor:
         return False
     if (
-        noop[0].get("restore_width") != 1
-        or noop[0].get("kv_head_indices") != [selected_event.get("selected_kv_head")]
-        or noop[0].get("diagnostic_only") is not False
-        or noop[0].get("deployable_performance") is not False
+        noop.get("restore_width") != 1
+        or noop.get("kv_head_indices") != [selected_head]
+        or noop.get("candidate_pool_rank") is not None
+        or noop.get("is_rank_zero_candidate") is not False
+        or noop.get("diagnostic_only") is not False
+        or noop.get("deployable_performance") is not False
     ):
         return False
     for pair in pairs:
@@ -441,12 +478,11 @@ def _pair_population_valid(result: dict[str, Any]) -> bool:
             return False
         if pair.get("fixed_trace_correctness_change") is not correctness_changed:
             return False
-    no_op = noop[0]
     return (
-        no_op.get("baseline_per_token_nll") == no_op.get("intervention_per_token_nll")
-        and no_op.get("swap_gain") == 0.0
-        and no_op.get("baseline_final_state_sha256") == no_op.get("intervention_final_state_sha256")
-        and (no_op.get("mutation") or {}).get("is_noop") is True
+        noop.get("baseline_per_token_nll") == noop.get("intervention_per_token_nll")
+        and noop.get("swap_gain") == 0.0
+        and noop.get("baseline_final_state_sha256") == noop.get("intervention_final_state_sha256")
+        and (noop.get("mutation") or {}).get("is_noop") is True
     )
 
 
@@ -573,77 +609,209 @@ def _raw_worker_binding_valid(fullkv: dict[str, Any], rkv: dict[str, Any]) -> bo
     )
 
 
+def _example_gain_matrix(result: dict[str, Any]) -> dict[str, Any]:
+    """Reconstruct one example's candidate-rank by restore-width matrix.
+
+    Every cell is read back from the primitive pair records; no cell is
+    ever taken from a worker-side summary.
+    """
+    pool = result["selected_event"]["candidate_pool"]
+    restore_pairs = [pair for pair in result["pair_records"] if pair["arm"] == RESTORE_ARM]
+    by_cell = {
+        (pair["candidate_pool_rank"], pair["restore_width"]): pair for pair in restore_pairs
+    }
+    rows = []
+    for rank, candidate in enumerate(pool):
+        cells = {width: by_cell.get((rank, width)) for width in RESTORE_WIDTHS}
+        gains = {
+            width: (None if pair is None else float(pair["swap_gain"]))
+            for width, pair in cells.items()
+        }
+        behaviour = {
+            width: (
+                None
+                if pair is None
+                else bool(
+                    pair["answer_margin_sign_change"]
+                    or pair["fixed_trace_extracted_answer_change"]
+                    or pair["fixed_trace_correctness_change"]
+                )
+            )
+            for width, pair in cells.items()
+        }
+        increment = (
+            None
+            if gains[1] is None or gains[2] is None
+            else gains[2] - gains[1]
+        )
+        rows.append(
+            {
+                "candidate_pool_rank": rank,
+                "is_rank_zero_candidate": rank == 0,
+                "candidate_absolute_position": candidate["absolute_token_position"],
+                "deployable_score": candidate["deployable_score"],
+                "width_1_gain": gains[1],
+                "width_2_gain": gains[2],
+                "width_increment": increment,
+                "width_1_behavioural_change": behaviour[1],
+                "width_2_behavioural_change": behaviour[2],
+            }
+        )
+    return {
+        "candidate_ordinal": result["candidate_ordinal"],
+        "unique_id": result["unique_id"],
+        "event_index": result["selected_event"]["event_index"],
+        "layer_index": result["selected_event"]["layer_index"],
+        "selected_kv_head": result["selected_event"]["selected_kv_head"],
+        "donor_absolute_position": result["selected_event"]["donor_absolute_position"],
+        "candidate_pool_size": len(pool),
+        "rows": rows,
+    }
+
+
+def _cell_gains(matrices: list[dict[str, Any]], *, rank_zero: bool, width: int) -> list[float]:
+    key = "width_1_gain" if width == 1 else "width_2_gain"
+    return [
+        row[key]
+        for matrix in matrices
+        for row in matrix["rows"]
+        if row["is_rank_zero_candidate"] is rank_zero and row[key] is not None
+    ]
+
+
 def _summarize(qualification_rows: list[dict[str, Any]], rkv_results: list[dict[str, Any]]) -> dict[str, Any]:
     selected = select_first_three_qualified(qualification_rows)
     selected_ordinals = {row["candidate_ordinal"] for row in selected}
     selected_results = [row for row in rkv_results if row["candidate_ordinal"] in selected_ordinals]
     all_pairs = [pair for result in selected_results for pair in result["pair_records"]]
-    arm_a_records = [pair for pair in all_pairs if pair["arm"] == "candidate_upper_bound"]
-    arm_b_records = [pair for pair in all_pairs if pair["arm"] == "restore_width"]
-    noop_records = [pair for pair in all_pairs if pair["arm"] == "no_op"]
-    arm_a_by_example: list[float] = []
-    for result in selected_results:
-        candidates = [pair for pair in result["pair_records"] if pair["arm"] == "candidate_upper_bound"]
-        arm_a_by_example.append(bounded_candidate_upper_bound(candidates))
-    arm_b_gains = [float(pair["swap_gain"]) for pair in arm_b_records]
+    restore_records = [pair for pair in all_pairs if pair["arm"] == RESTORE_ARM]
+    width_one_records = [pair for pair in restore_records if pair["restore_width"] == 1]
+    width_two_records = [pair for pair in restore_records if pair["restore_width"] == 2]
+    noop_records = [pair for pair in all_pairs if pair["arm"] == NOOP_ARM]
+    primitive_populations_valid = all(_pair_population_valid(result) for result in selected_results)
+
+    matrices = [_example_gain_matrix(result) for result in selected_results]
+    bounded_maxima_by_example = [
+        bounded_local_candidate_maximum(
+            [pair for pair in result["pair_records"] if pair["arm"] == RESTORE_ARM]
+        )
+        for result in selected_results
+    ]
+    rank_zero_width_one = _cell_gains(matrices, rank_zero=True, width=1)
+    rank_zero_width_two = _cell_gains(matrices, rank_zero=True, width=2)
+    other_width_one = _cell_gains(matrices, rank_zero=False, width=1)
+    other_width_two = _cell_gains(matrices, rank_zero=False, width=2)
+    all_gains = rank_zero_width_one + rank_zero_width_two + other_width_one + other_width_two
+    increments = [
+        row["width_increment"]
+        for matrix in matrices
+        for row in matrix["rows"]
+        if row["width_increment"] is not None
+    ]
+
     behavioural_change = any(
         pair["answer_margin_sign_change"]
         or pair["fixed_trace_extracted_answer_change"]
         or pair["fixed_trace_correctness_change"]
-        for pair in arm_a_records + arm_b_records
+        for pair in restore_records
     )
-    primitive_populations_valid = all(_pair_population_valid(result) for result in selected_results)
+    noop_maximum_absolute_difference = max(
+        (
+            max(
+                (
+                    abs(float(baseline) - float(intervention))
+                    for baseline, intervention in zip(
+                        pair["baseline_per_token_nll"], pair["intervention_per_token_nll"]
+                    )
+                ),
+                default=0.0,
+            )
+            for pair in noop_records
+        ),
+        default=None,
+    )
     noop_exact = (
         len(noop_records) == len(selected_results)
         and all(result["noop_exact"] is True for result in selected_results)
         and primitive_populations_valid
     )
-    expected_pairs = sum(len(result["selected_event"]["candidate_pool"]) + 2 for result in selected_results)
+    expected_pairs = sum(
+        len(result["selected_event"]["candidate_pool"]) * len(RESTORE_WIDTHS) + 1
+        for result in selected_results
+    )
     complete = (
         len(selected_results) == len(selected)
         and len(all_pairs) == expected_pairs
+        and expected_pairs <= MAXIMUM_TOTAL_PAIRS
         and primitive_populations_valid
     )
     classification = classify_pilot(
         qualified_examples=len(selected),
-        arm_a_gains=arm_a_by_example,
-        arm_b_gains=arm_b_gains,
+        rank_zero_width_one_gains=rank_zero_width_one,
+        non_rank_zero_width_one_gains=other_width_one,
+        rank_zero_width_two_gains=rank_zero_width_two,
+        non_rank_zero_width_two_gains=other_width_two,
         behavioural_change=behavioural_change,
         noop_exact=noop_exact,
         complete=complete,
     )
+
+    def above(values: list[float]) -> int:
+        return sum(value > SWAP_GAIN_THRESHOLD_NATS for value in values)
+
     return attach_canonical_hash(
         {
-            "artifact_schema_version": "faithkv-post-stage-c-diagnostic-pilot-summary-v1",
+            "artifact_schema_version": SUMMARY_SCHEMA_VERSION,
             "qualified_example_count": len(selected),
             "selected_candidate_ordinals": sorted(selected_ordinals),
             "selected_unique_ids": [row["unique_id"] for row in selected],
-            "completed_arm_a_pairs": len(arm_a_records),
-            "completed_arm_b_pairs": len(arm_b_records),
+            "completed_width_one_pairs": len(width_one_records),
+            "completed_width_two_pairs": len(width_two_records),
+            "completed_restore_pairs": len(restore_records),
             "completed_noop_pairs": len(noop_records),
             "expected_total_pairs": expected_pairs,
             "completed_total_pairs": len(all_pairs),
+            "maximum_pairs_per_selected_example": MAXIMUM_PAIRS_PER_SELECTED_EXAMPLE,
+            "maximum_total_pairs": MAXIMUM_TOTAL_PAIRS,
             "noop_exact": noop_exact,
+            "noop_maximum_absolute_difference": noop_maximum_absolute_difference,
             "primitive_populations_reconstructed": primitive_populations_valid,
-            "arm_a_bounded_upper_bounds": arm_a_by_example,
-            "arm_b_gains": arm_b_gains,
-            "largest_arm_a_gain": max(arm_a_by_example) if arm_a_by_example else None,
-            "largest_arm_b_gain": max(arm_b_gains) if arm_b_gains else None,
-            "arm_a_gains_above_0_01": sum(
-                float(pair["swap_gain"]) > SWAP_GAIN_THRESHOLD_NATS
-                for pair in arm_a_records
-            ),
-            "arm_a_bounded_maxima_above_0_01": sum(
-                value > SWAP_GAIN_THRESHOLD_NATS for value in arm_a_by_example
-            ),
-            "arm_b_gains_above_0_01": sum(value > SWAP_GAIN_THRESHOLD_NATS for value in arm_b_gains),
+            "per_example_gain_matrix": matrices,
+            "bounded_local_candidate_maxima": bounded_maxima_by_example,
+            "rank_zero_width_one_gains": rank_zero_width_one,
+            "rank_zero_width_two_gains": rank_zero_width_two,
+            "non_rank_zero_width_one_gains": other_width_one,
+            "non_rank_zero_width_two_gains": other_width_two,
+            "width_increments": increments,
+            "best_rank_zero_width_one_gain": max(rank_zero_width_one, default=None),
+            "best_rank_zero_width_two_gain": max(rank_zero_width_two, default=None),
+            "best_non_rank_zero_width_one_gain": max(other_width_one, default=None),
+            "best_non_rank_zero_width_two_gain": max(other_width_two, default=None),
+            "largest_gain_over_bounded_grid": max(all_gains, default=None),
+            "rank_zero_width_one_gains_above_0_01": above(rank_zero_width_one),
+            "rank_zero_width_two_gains_above_0_01": above(rank_zero_width_two),
+            "non_rank_zero_width_one_gains_above_0_01": above(other_width_one),
+            "non_rank_zero_width_two_gains_above_0_01": above(other_width_two),
+            "total_gains_above_0_01": above(all_gains),
+            "bounded_local_candidate_maxima_above_0_01": above(bounded_maxima_by_example),
+            "swap_gain_threshold_nats": SWAP_GAIN_THRESHOLD_NATS,
             "behavioural_change": behavioural_change,
-            "answer_margin_sign_changes": sum(pair["answer_margin_sign_change"] for pair in arm_a_records + arm_b_records),
-            "fixed_trace_answer_flips": 0,
-            "correctness_flips": 0,
+            "answer_margin_sign_changes": sum(
+                pair["answer_margin_sign_change"] for pair in restore_records
+            ),
+            "fixed_trace_answer_changes": sum(
+                pair["fixed_trace_extracted_answer_change"] for pair in restore_records
+            ),
+            "correctness_changes": sum(
+                pair["fixed_trace_correctness_change"] for pair in restore_records
+            ),
             "classification": classification.value,
+            "classification_letter": CLASSIFICATION_LETTER[classification],
             "classification_text": CLASSIFICATION_TEXT[classification],
-            "scale_limitation": "The result does not confirm or refute the immutable 8B R2 null.",
+            "scale_limitation": (
+                "A 1.5B result does not settle the 8B operating point; it neither "
+                "confirms nor refutes the immutable 8B R2 null."
+            ),
             "b2b_status": "blocked",
         }
     )
@@ -779,6 +947,7 @@ def run_diagnostic_pilot(
     repository_root = Path(repository_root).resolve()
     authorization = parse_authorization_document(authorization_document)
     preflight = _preflight(repository_root, authorization)
+    generation = generation_for_authorization_document(authorization.document_path)
     payload = authorization.payload
     attempt_id = uuid.uuid4().hex
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -813,7 +982,7 @@ def run_diagnostic_pilot(
         atomic_write_json(
             attempt / "invocation.json",
             {
-                "command": EXACT_EXECUTION_COMMAND,
+                "command": generation.exact_execution_command,
                 "authorization_document": str(authorization.document_path),
                 "execute": True,
                 "invocation_ordinal": 1,
@@ -829,8 +998,11 @@ def run_diagnostic_pilot(
         atomic_write_json(
             attempt / "protocol_binding.json",
             {
-                "protocol_document_path": PROTOCOL_DOCUMENT_PATH,
+                "generation": generation.label,
+                "protocol_document_path": generation.protocol_document_path,
                 "protocol_document_sha256": runtime["protocol_document_sha256"],
+                "maximum_pairs_per_selected_example": generation.maximum_pairs_per_selected_example,
+                "maximum_total_pairs": generation.maximum_total_pairs,
                 "authorization_id": payload["authorization_id"],
                 "authorization_document_sha256": authorization.document_sha256,
                 "authorized_implementation_sha": payload["authorized_implementation_sha"],
@@ -1018,7 +1190,16 @@ def verify_attempt(attempt_directory: str | Path) -> dict[str, Any]:
     if (attempt / "scientific_summary.json").exists():
         if not binding_path.is_file():
             raise DiagnosticExecutionRefused("successful attempt lacks protocol binding")
+        claim_generation = generation_for_authorization_document(
+            claim["authorization_document_path"]
+        )
         expected_binding = {
+            "generation": claim_generation.label,
+            "protocol_document_path": claim_generation.protocol_document_path,
+            "maximum_pairs_per_selected_example": (
+                claim_generation.maximum_pairs_per_selected_example
+            ),
+            "maximum_total_pairs": claim_generation.maximum_total_pairs,
             "protocol_document_sha256": authorization_payload["protocol_document_sha256"],
             "runtime_config_canonical_sha256": authorization_payload[
                 "runtime_config_canonical_sha256"

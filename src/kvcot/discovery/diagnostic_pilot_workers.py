@@ -15,7 +15,10 @@ from kvcot.discovery.diagnostic_pilot_contract import (
     EXPECTED_KV_HEADS,
     EXPECTED_QUERY_HEADS,
     MODEL_REVISION,
+    NOOP_ARM,
     PAIR_SCHEMA_VERSION,
+    RESTORE_ARM,
+    RESTORE_WIDTHS,
     RKV_REVISION,
     SCORED_HORIZON,
     TOKENIZER_REVISION,
@@ -453,7 +456,7 @@ def _pair_record(
     *, target: Any, candidate_position: int, donor_position: int, width: int, baseline: dict[str, Any],
     step_fn: Any, bridge_token_id: int, reference_ids: list[int], first_scored_position: int,
     answer_positions: set[int], correct_answer: bool, fixed_trace_answer: str | None,
-    fixed_trace_correctness_status: str, arm: str,
+    fixed_trace_correctness_status: str, arm: str, candidate_pool_rank: int | None,
 ) -> dict[str, Any]:
     from kvcot.discovery.diagnostic_pilot_swap import apply_diagnostic_kv_restore
 
@@ -500,13 +503,19 @@ def _pair_record(
     return {
         "artifact_schema_version": PAIR_SCHEMA_VERSION,
         "arm": arm,
-        "diagnostic_only": arm == "candidate_upper_bound",
+        # Every grid cell is a bounded diagnostic probe over a frozen
+        # candidate pool.  The no-op is a mechanical control, not a
+        # diagnostic claim.  Neither is ever a deployable performance
+        # number.
+        "diagnostic_only": arm == RESTORE_ARM,
         "deployable_performance": False,
         "compaction_event_id": event.compaction_event_id,
         "layer_index": event.layer_index,
         "selected_kv_head": event.kv_head_index,
         "kv_head_indices": list(heads),
         "restore_width": width,
+        "candidate_pool_rank": candidate_pool_rank,
+        "is_rank_zero_candidate": candidate_pool_rank == 0,
         "candidate_absolute_position": candidate_position,
         "donor_absolute_position": donor_position,
         "donor_post_storage_positions_by_head": resolved_donor_slots,
@@ -750,45 +759,32 @@ def run_rkv_diagnostic_worker(config: Any, manifest: Any, fullkv_result: dict[st
             correct_answer=rkv_status == "correct",
         )
         donor = int(selected_event["donor_absolute_position"])
+        # The complete bounded factorial grid for the one frozen event:
+        # every candidate in the frozen pool at every protocol restore
+        # width, emitted rank-major so the primitive order is itself
+        # reconstructable.  Same event, same layer, same intervention time,
+        # same donor, same 48-token readout, same baseline for every cell.
         for candidate_rank, candidate in enumerate(selected_event["candidate_pool"]):
-            candidate_pair = _pair_record(
-                    target=selected_target,
-                    candidate_position=int(candidate["absolute_token_position"]),
-                    donor_position=donor,
-                    width=1,
-                    baseline=baseline,
-                    step_fn=step_fn,
-                    bridge_token_id=bridge_token_id,
-                    reference_ids=reference_ids,
-                    first_scored_position=t + 2,
-                    answer_positions=answer_positions,
-                    correct_answer=rkv_status == "correct",
-                    fixed_trace_answer=trace.natural_answer,
-                    fixed_trace_correctness_status=rkv_status,
-                    arm="candidate_upper_bound",
+            for width in RESTORE_WIDTHS:
+                pairs.append(
+                    _pair_record(
+                        target=selected_target,
+                        candidate_position=int(candidate["absolute_token_position"]),
+                        donor_position=donor,
+                        width=width,
+                        baseline=baseline,
+                        step_fn=step_fn,
+                        bridge_token_id=bridge_token_id,
+                        reference_ids=reference_ids,
+                        first_scored_position=t + 2,
+                        answer_positions=answer_positions,
+                        correct_answer=rkv_status == "correct",
+                        fixed_trace_answer=trace.natural_answer,
+                        fixed_trace_correctness_status=rkv_status,
+                        arm=RESTORE_ARM,
+                        candidate_pool_rank=candidate_rank,
+                    )
                 )
-            candidate_pair["candidate_pool_rank"] = candidate_rank
-            candidate_pair["is_control_candidate"] = candidate_rank == 0
-            pairs.append(candidate_pair)
-        control_candidate = int(selected_event["candidate_pool"][0]["absolute_token_position"])
-        pairs.append(
-            _pair_record(
-                target=selected_target,
-                candidate_position=control_candidate,
-                donor_position=donor,
-                width=2,
-                baseline=baseline,
-                step_fn=step_fn,
-                bridge_token_id=bridge_token_id,
-                reference_ids=reference_ids,
-                first_scored_position=t + 2,
-                answer_positions=answer_positions,
-                correct_answer=rkv_status == "correct",
-                fixed_trace_answer=trace.natural_answer,
-                fixed_trace_correctness_status=rkv_status,
-                arm="restore_width",
-            )
-        )
         noop = _pair_record(
             target=selected_target,
             candidate_position=donor,
@@ -803,7 +799,8 @@ def run_rkv_diagnostic_worker(config: Any, manifest: Any, fullkv_result: dict[st
             correct_answer=rkv_status == "correct",
             fixed_trace_answer=trace.natural_answer,
             fixed_trace_correctness_status=rkv_status,
-            arm="no_op",
+            arm=NOOP_ARM,
+            candidate_pool_rank=None,
         )
         pairs.append(noop)
         noop_exact = (

@@ -3179,7 +3179,12 @@ def cmd_prepare_post_stage_c_diagnostic_pilot(args: argparse.Namespace) -> int:
     from kvcot.discovery.diagnostic_pilot_prepare import prepare_runtime_inputs
 
     try:
-        result = prepare_runtime_inputs(repository_root=".", runtime_root=args.runtime_root)
+        result = prepare_runtime_inputs(
+            repository_root=".",
+            runtime_root=args.runtime_root,
+            output_root=args.output_root,
+            generation=args.generation,
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"prepare-post-stage-c-diagnostic-pilot: REFUSED: {exc}", file=sys.stderr)
         return 2
@@ -3443,6 +3448,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--runtime-root",
         default="/workspace/faithkv-post-stage-c-diagnostic-runtime",
+    )
+    p.add_argument(
+        "--output-root",
+        default="/workspace/faithkv-post-stage-c-diagnostic-execution",
+        help="Absolute execution output root the prepared runtime artifact binds.",
+    )
+    p.add_argument(
+        "--generation",
+        default="r1",
+        choices=("r1", "r2"),
+        help="Diagnostic-pilot generation whose protocol document and pair budget are bound.",
     )
     p.set_defaults(func=cmd_prepare_post_stage_c_diagnostic_pilot)
 

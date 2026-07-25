@@ -9,6 +9,7 @@ from kvcot.discovery.diagnostic_pilot_contract import (
     MAXIMUM_CANDIDATE_POOL_SIZE,
     MAXIMUM_QUALIFICATION_CANDIDATES,
     MAXIMUM_SELECTED_EXAMPLES,
+    RESTORE_ARM,
 )
 
 FORBIDDEN_QUALIFICATION_FIELDS = frozenset(
@@ -50,13 +51,19 @@ def freeze_candidate_pool(candidates: Iterable[CandidateScore]) -> FrozenCandida
     return FrozenCandidatePool(candidates=tuple(ordered[:MAXIMUM_CANDIDATE_POOL_SIZE]))
 
 
-def bounded_candidate_upper_bound(pair_records: Sequence[dict[str, Any]]) -> float:
+def bounded_local_candidate_maximum(pair_records: Sequence[dict[str, Any]]) -> float:
+    """Maximum gain over a bounded, score-prioritized candidate pool.
+
+    This is a bounded local candidate maximum over at most four frozen
+    candidates at one event in one layer.  It is not a causal oracle, not a
+    global upper bound, and not a deployable performance number.
+    """
     if not pair_records:
-        raise ValueError("candidate upper bound requires at least one primitive pair")
+        raise ValueError("a bounded candidate maximum requires at least one primitive pair")
     values = []
     for record in pair_records:
-        if record.get("arm") != "candidate_upper_bound" or record.get("diagnostic_only") is not True:
-            raise ValueError("candidate upper-bound records must be explicitly diagnostic")
+        if record.get("arm") != RESTORE_ARM or record.get("diagnostic_only") is not True:
+            raise ValueError("bounded candidate records must be explicitly diagnostic restores")
         value = record.get("swap_gain")
         if type(value) not in (float, int) or not math.isfinite(float(value)):
             raise ValueError("candidate pair gain must be finite")
