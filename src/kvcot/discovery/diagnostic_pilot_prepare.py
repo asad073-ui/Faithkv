@@ -109,6 +109,23 @@ def _write_new_or_identical(path: Path, payload: dict[str, Any]) -> None:
     atomic_write_json(path, payload)
 
 
+def _verify_candidate_prompt_bindings(
+    prompts: dict[str, Any], expected_manifests: list[B2AOneExampleManifest]
+) -> None:
+    expected = {
+        "artifact_schema_version": "faithkv-post-stage-c-diagnostic-prompts-v1",
+        "tokenizer_repository": TOKENIZER_REPOSITORY,
+        "tokenizer_revision": TOKENIZER_REVISION,
+        "qualification_order": list(range(MAXIMUM_QUALIFICATION_CANDIDATES)),
+        "manifests": [manifest.model_dump(mode="json") for manifest in expected_manifests],
+    }
+    for key, value in expected.items():
+        if prompts.get(key) != value:
+            raise DiagnosticPreparationRefused(
+                f"candidate prompt field {key!r} differs from the frozen manifest/tokenizer reconstruction"
+            )
+
+
 def prepare_runtime_inputs(
     *, repository_root: str | Path, runtime_root: str | Path = DEFAULT_RUNTIME_ROOT
 ) -> dict[str, Any]:
@@ -217,7 +234,10 @@ def prepare_runtime_inputs(
     }
 
 
-def verify_runtime_inputs(path: str | Path) -> dict[str, Any]:
+def verify_runtime_inputs(
+    path: str | Path, *, repository_root: str | Path = "."
+) -> dict[str, Any]:
+    repository_root = Path(repository_root).resolve()
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     verify_canonical_hash(payload)
     if payload.get("artifact_schema_version") != RUNTIME_SCHEMA_VERSION:
@@ -257,20 +277,56 @@ def verify_runtime_inputs(path: str | Path) -> dict[str, Any]:
     for key, value in expected.items():
         if payload.get(key) != value:
             raise DiagnosticPreparationRefused(f"runtime-config field {key!r} does not match the protocol")
+    if sha256_file(repository_root / PROTOCOL_DOCUMENT_PATH) != payload.get(
+        "protocol_document_sha256"
+    ):
+        raise DiagnosticPreparationRefused("runtime protocol hash differs from the checked-out document")
+    config_path = repository_root / CONFIG_PATH
+    config = load_discovery_config(config_path)
+    derived_config_hashes = {
+        "config_byte_sha256": sha256_file(config_path),
+        "config_canonical_sha256": canonical_config_hash(config),
+        "generation_config_canonical_sha256": generation_config_hash(config.generation),
+        "rkv_config_canonical_sha256": rkv_config_hash(config.rkv),
+    }
+    for key, value in derived_config_hashes.items():
+        if payload.get(key) != value:
+            raise DiagnosticPreparationRefused(
+                f"runtime {key!r} differs from the checked-out diagnostic config"
+            )
+    candidate_manifest = _load_candidate_manifest(repository_root)
     model_snapshot = resolve_local_snapshot(MODEL_REPOSITORY, MODEL_REVISION, "model")
     tokenizer_snapshot = resolve_local_snapshot(TOKENIZER_REPOSITORY, TOKENIZER_REVISION, "tokenizer")
     if payload.get("model_snapshot_path") != model_snapshot.local_path:
         raise DiagnosticPreparationRefused("runtime model snapshot path is not the exact local pin")
     if payload.get("tokenizer_snapshot_path") != tokenizer_snapshot.local_path:
         raise DiagnosticPreparationRefused("runtime tokenizer snapshot path is not the exact local pin")
-    if sha256_file(Path(model_snapshot.local_path) / "config.json") != payload.get("model_config_sha256"):
+    model_config_path = Path(model_snapshot.local_path) / "config.json"
+    if sha256_file(model_config_path) != payload.get("model_config_sha256"):
         raise DiagnosticPreparationRefused("runtime model config hash mismatch")
+    model_config = json.loads(model_config_path.read_text(encoding="utf-8"))
+    expected_architecture = {
+        "model_type": model_config.get("model_type"),
+        "num_hidden_layers": model_config.get("num_hidden_layers"),
+        "num_attention_heads": model_config.get("num_attention_heads"),
+        "num_key_value_heads": model_config.get("num_key_value_heads"),
+        "head_dim": model_config.get("hidden_size") // model_config.get("num_attention_heads"),
+        "torch_dtype": model_config.get("torch_dtype"),
+    }
+    if payload.get("model_config_architecture") != expected_architecture:
+        raise DiagnosticPreparationRefused("runtime model architecture differs from exact config bytes")
     prompts = json.loads(Path(payload["candidate_prompts_path"]).read_text(encoding="utf-8"))
     verify_canonical_hash(prompts)
     if prompts["canonical_sha256"] != payload["candidate_prompts_canonical_sha256"]:
         raise DiagnosticPreparationRefused("candidate prompt artifact does not match runtime binding")
-    if len(prompts["manifests"]) != MAXIMUM_QUALIFICATION_CANDIDATES:
-        raise DiagnosticPreparationRefused("candidate prompt count does not match frozen maximum")
-    for raw in prompts["manifests"]:
-        B2AOneExampleManifest.model_validate(raw)
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_snapshot.local_path, local_files_only=True, use_fast=True
+    )
+    expected_manifests = [
+        _manifest_for_candidate(candidate, tokenizer)
+        for candidate in candidate_manifest["candidates"][:MAXIMUM_QUALIFICATION_CANDIDATES]
+    ]
+    _verify_candidate_prompt_bindings(prompts, expected_manifests)
     return payload

@@ -1,11 +1,20 @@
 import pytest
 
+from kvcot.discovery.diagnostic_pilot_contract import (
+    MAXIMUM_QUALIFICATION_CANDIDATES,
+    TOKENIZER_REPOSITORY,
+    TOKENIZER_REVISION,
+)
 from kvcot.discovery.diagnostic_pilot_manifest import (
     CandidateScore,
     bounded_candidate_upper_bound,
     choose_event_by_deployable_score,
     freeze_candidate_pool,
     select_first_three_qualified,
+)
+from kvcot.discovery.diagnostic_pilot_prepare import (
+    DiagnosticPreparationRefused,
+    _verify_candidate_prompt_bindings,
 )
 
 
@@ -98,3 +107,26 @@ def test_one_event_per_example_is_structurally_represented_by_selected_event():
     row["selected_event_count"] = 2
     with pytest.raises(ValueError, match="exactly one"):
         select_first_three_qualified([row])
+
+
+def test_external_prompt_artifact_must_equal_frozen_manifest_reconstruction():
+    class SyntheticManifest:
+        def __init__(self, ordinal):
+            self.ordinal = ordinal
+
+        def model_dump(self, *, mode):
+            assert mode == "json"
+            return {"candidate_ordinal": self.ordinal, "prompt_token_ids": [self.ordinal]}
+
+    manifests = [SyntheticManifest(index) for index in range(MAXIMUM_QUALIFICATION_CANDIDATES)]
+    prompts = {
+        "artifact_schema_version": "faithkv-post-stage-c-diagnostic-prompts-v1",
+        "tokenizer_repository": TOKENIZER_REPOSITORY,
+        "tokenizer_revision": TOKENIZER_REVISION,
+        "qualification_order": list(range(MAXIMUM_QUALIFICATION_CANDIDATES)),
+        "manifests": [manifest.model_dump(mode="json") for manifest in manifests],
+    }
+    _verify_candidate_prompt_bindings(prompts, manifests)
+    prompts["manifests"][0]["prompt_token_ids"] = [999]
+    with pytest.raises(DiagnosticPreparationRefused, match="frozen manifest/tokenizer"):
+        _verify_candidate_prompt_bindings(prompts, manifests)

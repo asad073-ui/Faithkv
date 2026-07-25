@@ -65,7 +65,9 @@ def _git(repository_root: Path, *args: str) -> str:
 
 def _preflight(repository_root: Path, authorization: Any) -> dict[str, Any]:
     payload = authorization.payload
-    runtime = verify_runtime_inputs(payload["runtime_config_path"])
+    runtime = verify_runtime_inputs(
+        payload["runtime_config_path"], repository_root=repository_root
+    )
     head = _git(repository_root, "rev-parse", "HEAD")
     remote_head = _git(repository_root, "rev-parse", f"origin/{BRANCH}")
     branch = _git(repository_root, "branch", "--show-current")
@@ -88,6 +90,8 @@ def _preflight(repository_root: Path, authorization: Any) -> dict[str, Any]:
         raise DiagnosticExecutionRefused("R-KV submodule revision mismatch")
     if runtime["canonical_sha256"] != payload["runtime_config_canonical_sha256"]:
         raise DiagnosticExecutionRefused("runtime-config canonical hash mismatch")
+    if runtime["output_root"] != payload["output_root"]:
+        raise DiagnosticExecutionRefused("authorization output root differs from runtime binding")
     if runtime["protocol_document_sha256"] != payload["protocol_document_sha256"]:
         raise DiagnosticExecutionRefused("protocol document hash mismatch")
     if sha256_file(repository_root / PROTOCOL_DOCUMENT_PATH) != runtime[
@@ -161,6 +165,10 @@ def _launch_worker(
     *, role: str, ordinal: int, output: Path, config_path: Path, prompts_path: Path,
     attempt_id: str, timeout: float, fullkv_result: Path | None = None,
 ) -> dict[str, Any]:
+    if timeout <= 0:
+        raise DiagnosticExecutionRefused(
+            f"{role} worker was not launched because the pilot wall-time limit is exhausted"
+        )
     command = [
         sys.executable,
         "-m",
@@ -183,7 +191,7 @@ def _launch_worker(
         env=_worker_env(attempt_id),
         text=True,
         capture_output=True,
-        timeout=max(1.0, timeout),
+        timeout=timeout,
         check=False,
     )
     atomic_write_text(output.with_suffix(".stdout.log"), completed.stdout)
@@ -482,6 +490,89 @@ def _answer_margin_evidence_valid(rows: Any) -> bool:
     return True
 
 
+def _raw_worker_binding_valid(fullkv: dict[str, Any], rkv: dict[str, Any]) -> bool:
+    from kvcot.discovery.strict_device import (
+        _single_worker_placement_ok,
+        verify_device_gate_from_raw_evidence,
+    )
+
+    ordinal = rkv.get("candidate_ordinal")
+    fullkv_identity = fullkv.get("dataset_row_identity") or {}
+    qualification = dict(rkv.get("qualification") or {})
+    qualification["candidate_ordinal"] = ordinal
+    try:
+        qualified = mechanically_qualifies(qualification)
+    except (TypeError, ValueError):
+        return False
+    cache_lengths = rkv.get("final_cache_length_per_layer") or {}
+    full_token_count = rkv.get("natural_full_token_count")
+    meaningful_compression = (
+        type(full_token_count) is int
+        and full_token_count > 0
+        and type(qualification.get("observed_compaction_event_count")) is int
+        and qualification["observed_compaction_event_count"] > 0
+        and isinstance(cache_lengths, dict)
+        and bool(cache_lengths)
+        and all(type(length) is int and length >= 0 for length in cache_lengths.values())
+        and all(length <= full_token_count for length in cache_lengths.values())
+        and any(length < full_token_count for length in cache_lengths.values())
+    )
+    selected_event = rkv.get("selected_event")
+    derived = {
+        "rkv_replay_mechanically_valid": rkv.get("selected_event_replay_valid") is True
+        and rkv.get("rkv_natural_cap_hit") is False,
+        "correctness_status_matched": fullkv.get("natural_answer_status")
+        == rkv.get("fixed_trace_correctness_status"),
+        "meaningful_compression": meaningful_compression,
+        "eligible_event_exists": bool(rkv.get("eligible_event_score_evidence")),
+        "eligible_scored_event_count": len(rkv.get("eligible_event_score_evidence") or []),
+        "selected_event_has_two_candidates": bool(
+            selected_event and len(selected_event.get("candidate_pool") or []) >= 2
+        ),
+        "selected_event_count": 1 if selected_event is not None else 0,
+    }
+    if any(qualification.get(key) != value for key, value in derived.items()):
+        return False
+    fullkv_valid = (
+        fullkv.get("cap_hit") is False
+        and fullkv.get("actual_batch_size_verified") is True
+        and _single_worker_placement_ok(fullkv.get("parameter_placement"))
+        and verify_device_gate_from_raw_evidence(
+            fullkv.get("device_evidence", {}), rkv.get("device_evidence", {})
+        )
+    )
+    return (
+        type(ordinal) is int
+        and fullkv.get("candidate_ordinal") == ordinal
+        and fullkv.get("role") == "fullkv"
+        and fullkv.get("model_revision") == MODEL_REVISION
+        and fullkv.get("tokenizer_revision") == TOKENIZER_REVISION
+        and rkv.get("role") == "diagnostic_rkv"
+        and rkv.get("model_revision") == MODEL_REVISION
+        and rkv.get("tokenizer_revision") == TOKENIZER_REVISION
+        and rkv.get("rkv_revision") == RKV_REVISION
+        and (rkv.get("architecture") or {}).get("num_attention_heads") == 12
+        and (rkv.get("architecture") or {}).get("num_key_value_heads") == 2
+        and fullkv_identity.get("unique_id") == rkv.get("unique_id")
+        and fullkv.get("dataset_repo") == rkv.get("dataset_repo")
+        and fullkv.get("dataset_revision") == rkv.get("dataset_revision")
+        and fullkv.get("manifest_hash") == rkv.get("manifest_hash")
+        and fullkv.get("prompt_token_ids_sha256") == rkv.get("prompt_token_ids_sha256")
+        and fullkv.get("prompt_token_count") == rkv.get("prompt_token_count")
+        and qualification.get("unique_id") == rkv.get("unique_id")
+        and qualification.get("fullkv_correctness_status")
+        == fullkv.get("natural_answer_status")
+        and qualification.get("rkv_correctness_status")
+        == rkv.get("fixed_trace_correctness_status")
+        and qualification.get("rkv_natural_cap_hit") == rkv.get("rkv_natural_cap_hit")
+        and qualification.get("fullkv_execution_valid") is fullkv_valid
+        and rkv.get("qualified") is qualified
+        and qualification.get("intervention_not_evaluated") is True
+        and _single_worker_placement_ok(rkv.get("parameter_placement"))
+        and (qualified or (rkv.get("pair_records") == [] and rkv.get("noop_exact") is None))
+    )
+
+
 def _summarize(qualification_rows: list[dict[str, Any]], rkv_results: list[dict[str, Any]]) -> dict[str, Any]:
     selected = select_first_three_qualified(qualification_rows)
     selected_ordinals = {row["candidate_ordinal"] for row in selected}
@@ -538,7 +629,13 @@ def _summarize(qualification_rows: list[dict[str, Any]], rkv_results: list[dict[
             "arm_b_gains": arm_b_gains,
             "largest_arm_a_gain": max(arm_a_by_example) if arm_a_by_example else None,
             "largest_arm_b_gain": max(arm_b_gains) if arm_b_gains else None,
-            "arm_a_gains_above_0_01": sum(value > SWAP_GAIN_THRESHOLD_NATS for value in arm_a_by_example),
+            "arm_a_gains_above_0_01": sum(
+                float(pair["swap_gain"]) > SWAP_GAIN_THRESHOLD_NATS
+                for pair in arm_a_records
+            ),
+            "arm_a_bounded_maxima_above_0_01": sum(
+                value > SWAP_GAIN_THRESHOLD_NATS for value in arm_a_by_example
+            ),
             "arm_b_gains_above_0_01": sum(value > SWAP_GAIN_THRESHOLD_NATS for value in arm_b_gains),
             "behavioural_change": behavioural_change,
             "answer_margin_sign_changes": sum(pair["answer_margin_sign_change"] for pair in arm_a_records + arm_b_records),
@@ -580,12 +677,24 @@ def _preserve_consumed_failure(
     }
     preservation_errors: list[str] = []
     if attempt.is_dir():
+        failure_path = attempt / "failure.json"
+        completion_path = attempt / "completion.json"
+        final_path = attempt / "final.json"
+        for label, path, artifact in (
+            ("failure", failure_path, failure),
+            ("completion", completion_path, failure),
+        ):
+            try:
+                if not path.exists():
+                    atomic_write_json(path, artifact)
+            except BaseException as preserve_exc:
+                preservation_errors.append(
+                    f"attempt-{label}:{type(preserve_exc).__name__}:{preserve_exc}"
+                )
         try:
-            if not (attempt / "completion.json").exists():
-                atomic_write_json(attempt / "completion.json", failure)
-            if not (attempt / "final.json").exists():
+            if not final_path.exists():
                 atomic_write_json(
-                    attempt / "final.json",
+                    final_path,
                     {
                         "attempt_id": attempt_id,
                         "claim_path": str(claim_path),
@@ -595,11 +704,12 @@ def _preserve_consumed_failure(
                         "references": _attempt_references(attempt),
                     },
                 )
-            return
         except BaseException as preserve_exc:
             preservation_errors.append(
-                f"attempt:{type(preserve_exc).__name__}:{preserve_exc}"
+                f"attempt-final:{type(preserve_exc).__name__}:{preserve_exc}"
             )
+        if not preservation_errors:
+            return
     fallback = claim_path.with_name(f"{claim_path.name}.failure.json")
     fallback_payload = dict(failure, preservation_errors=preservation_errors)
     try:
@@ -713,7 +823,9 @@ def run_diagnostic_pilot(
         )
         atomic_write_json(attempt / "authorization_claim.json", claim)
         atomic_write_json(attempt / "preflight.json", preflight)
-        runtime = verify_runtime_inputs(payload["runtime_config_path"])
+        runtime = verify_runtime_inputs(
+            payload["runtime_config_path"], repository_root=repository_root
+        )
         atomic_write_json(
             attempt / "protocol_binding.json",
             {
@@ -770,6 +882,10 @@ def run_diagnostic_pilot(
                 raise DiagnosticExecutionRefused("FullKV peak allocated/reserved VRAM exceeded 22 GiB")
             fullkv_results.append(fullkv)
             remaining = RUNTIME_LIMIT_SECONDS - (time.perf_counter() - started)
+            if remaining <= 0:
+                raise DiagnosticExecutionRefused(
+                    "pilot wall-time limit exhausted before diagnostic R-KV launch"
+                )
             rkv_path = attempt / "rkv" / f"candidate-{ordinal}.json"
             rkv = _launch_worker(
                 role="diagnostic-rkv",
@@ -788,6 +904,8 @@ def run_diagnostic_pilot(
             if mechanically_qualifies(qualification):
                 qualified_count += 1
 
+        if time.perf_counter() - started > RUNTIME_LIMIT_SECONDS:
+            raise DiagnosticExecutionRefused("pilot wall-time limit exhausted after worker completion")
         summary = _summarize(qualification_rows, rkv_results)
         selected_ordinals = set(summary["selected_candidate_ordinals"])
         selected_results = [row for row in rkv_results if row["candidate_ordinal"] in selected_ordinals]
@@ -797,15 +915,21 @@ def run_diagnostic_pilot(
             atomic_write_json(attempt / name, projection)
         atomic_write_json(attempt / "scientific_summary.json", summary)
         runtime_seconds = time.perf_counter() - started
-        peak_vram = max(
-            [max(int(row["peak_cuda_allocated_bytes"]), int(row["peak_cuda_reserved_bytes"])) for row in rkv_results]
-            + [max(int(row["peak_cuda_allocated_bytes"]), int(row["peak_cuda_reserved_bytes"])) for row in fullkv_results]
-            + [0]
+        if runtime_seconds > RUNTIME_LIMIT_SECONDS:
+            raise DiagnosticExecutionRefused("pilot wall-time limit exceeded before completion")
+        all_worker_results = rkv_results + fullkv_results
+        peak_allocated = max(
+            [int(row["peak_cuda_allocated_bytes"]) for row in all_worker_results] + [0]
         )
+        peak_reserved = max(
+            [int(row["peak_cuda_reserved_bytes"]) for row in all_worker_results] + [0]
+        )
+        peak_vram = max(peak_allocated, peak_reserved)
         completion = {
             "completed": True,
             "runtime_seconds": runtime_seconds,
-            "peak_cuda_allocated_bytes": peak_vram,
+            "peak_cuda_allocated_bytes": peak_allocated,
+            "peak_cuda_reserved_bytes": peak_reserved,
             "peak_tracked_cuda_bytes": peak_vram,
             "claim_path": str(claim_path),
             "claim_canonical_sha256": claim["canonical_sha256"],
@@ -845,6 +969,7 @@ def verify_attempt(attempt_directory: str | Path) -> dict[str, Any]:
 
     attempt = Path(attempt_directory).resolve()
     final = json.loads((attempt / "final.json").read_text(encoding="utf-8"))
+    completion = json.loads((attempt / "completion.json").read_text(encoding="utf-8"))
     if _attempt_references(attempt) != final["references"]:
         raise DiagnosticExecutionRefused("final reference manifest is incomplete or has unexpected files")
     for reference in final["references"]["files"]:
@@ -854,6 +979,8 @@ def verify_attempt(attempt_directory: str | Path) -> dict[str, Any]:
     claim = verify_claim(attempt / "authorization_claim.json")
     if final.get("claim_canonical_sha256") != claim.get("canonical_sha256"):
         raise DiagnosticExecutionRefused("final stored claim canonical hash mismatch")
+    if completion.get("retry_allowed") is not False:
+        raise DiagnosticExecutionRefused("completion must permanently prohibit retry")
     if claim.get("attempt_id") != final.get("attempt_id"):
         raise DiagnosticExecutionRefused("claim attempt ID does not match final")
     if Path(claim.get("attempt_directory", "")).resolve() != attempt:
@@ -863,7 +990,20 @@ def verify_attempt(attempt_directory: str | Path) -> dict[str, Any]:
         attempt / "authorization_claim.json"
     ):
         raise DiagnosticExecutionRefused("external claim and attempt claim copy differ")
-    if (attempt / "protocol_binding.json").exists():
+    authorization = parse_authorization_document(claim["authorization_document_path"])
+    if authorization.document_sha256 != claim.get("authorization_document_sha256"):
+        raise DiagnosticExecutionRefused("claim authorization-document hash mismatch")
+    authorization_payload = authorization.payload
+    if (
+        authorization_payload.get("authorization_id") != claim.get("authorization_id")
+        or authorization_payload.get("authorized_implementation_sha")
+        != claim.get("authorized_implementation_sha")
+        or Path(authorization_payload.get("claim_path", "")).resolve() != external_claim.resolve()
+        or attempt.parent != Path(authorization_payload.get("output_root", "")).resolve()
+    ):
+        raise DiagnosticExecutionRefused("claim differs from the verified execution authorization")
+    binding_path = attempt / "protocol_binding.json"
+    if binding_path.exists():
         binding = json.loads((attempt / "protocol_binding.json").read_text(encoding="utf-8"))
         if binding.get("authorization_id") != claim.get("authorization_id"):
             raise DiagnosticExecutionRefused("protocol binding authorization ID mismatch")
@@ -876,8 +1016,33 @@ def verify_attempt(attempt_directory: str | Path) -> dict[str, Any]:
         ):
             raise DiagnosticExecutionRefused("protocol binding implementation SHA mismatch")
     if (attempt / "scientific_summary.json").exists():
+        if not binding_path.is_file():
+            raise DiagnosticExecutionRefused("successful attempt lacks protocol binding")
+        expected_binding = {
+            "protocol_document_sha256": authorization_payload["protocol_document_sha256"],
+            "runtime_config_canonical_sha256": authorization_payload[
+                "runtime_config_canonical_sha256"
+            ],
+            "candidate_manifest_canonical_sha256": authorization_payload[
+                "candidate_manifest_canonical_sha256"
+            ],
+            "model_revision": authorization_payload["model_revision"],
+            "tokenizer_revision": authorization_payload["tokenizer_revision"],
+            "rkv_revision": authorization_payload["rkv_revision"],
+        }
+        if any(binding.get(key) != value for key, value in expected_binding.items()):
+            raise DiagnosticExecutionRefused("protocol binding differs from execution authorization")
         qualification = json.loads((attempt / "qualification.json").read_text(encoding="utf-8"))
         rkv_results = [json.loads(path.read_text(encoding="utf-8")) for path in sorted((attempt / "rkv").glob("candidate-*.json"))]
+        fullkv_results = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted((attempt / "fullkv").glob("candidate-*.json"))
+        ]
+        if len(fullkv_results) != len(rkv_results) or not all(
+            _raw_worker_binding_valid(fullkv, rkv)
+            for fullkv, rkv in zip(fullkv_results, rkv_results)
+        ):
+            raise DiagnosticExecutionRefused("FullKV/R-KV raw worker binding mismatch")
         reconstructed_qualification = []
         for row in rkv_results:
             qualification_row = dict(row["qualification"])
@@ -889,6 +1054,19 @@ def verify_attempt(attempt_directory: str | Path) -> dict[str, Any]:
         stored = json.loads((attempt / "scientific_summary.json").read_text(encoding="utf-8"))
         if reconstructed != stored:
             raise DiagnosticExecutionRefused("primitive records do not reconstruct the stored scientific summary")
+        if final.get("scientific_summary") != stored:
+            raise DiagnosticExecutionRefused("final embedded scientific summary differs from referenced file")
+        if final.get("completion") != completion:
+            raise DiagnosticExecutionRefused("final embedded completion differs from referenced file")
+        if (
+            completion.get("completed") is not True
+            or completion.get("claim_canonical_sha256") != claim.get("canonical_sha256")
+            or type(completion.get("runtime_seconds")) not in (float, int)
+            or completion["runtime_seconds"] > RUNTIME_LIMIT_SECONDS
+            or type(completion.get("peak_tracked_cuda_bytes")) is not int
+            or completion["peak_tracked_cuda_bytes"] > VRAM_LIMIT_BYTES
+        ):
+            raise DiagnosticExecutionRefused("successful completion violates frozen runtime evidence")
         selected_ordinals = set(reconstructed["selected_candidate_ordinals"])
         selected_results = [
             row for row in rkv_results if row["candidate_ordinal"] in selected_ordinals
@@ -897,4 +1075,6 @@ def verify_attempt(attempt_directory: str | Path) -> dict[str, Any]:
             observed = json.loads((attempt / name).read_text(encoding="utf-8"))
             if observed != expected:
                 raise DiagnosticExecutionRefused(f"{name} differs from worker primitives")
+    elif final.get("failure") != completion:
+        raise DiagnosticExecutionRefused("final embedded failure differs from referenced completion")
     return {"verified": True, "attempt_directory": str(attempt), "final_sha256": sha256_file(attempt / "final.json")}

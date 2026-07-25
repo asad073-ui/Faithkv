@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import time
 
 import pytest
 
@@ -22,6 +23,10 @@ from kvcot.discovery.diagnostic_pilot_contract import (
     attach_canonical_hash,
 )
 from kvcot.discovery.diagnostic_pilot_execute import (
+    DiagnosticExecutionRefused,
+    _launch_worker,
+    _preserve_consumed_failure,
+    _raw_worker_binding_valid,
     _summarize,
     dry_run_diagnostic_pilot,
     run_diagnostic_pilot,
@@ -41,6 +46,38 @@ def qualification(ordinal):
         "selected_event_has_two_candidates": True,
         "selected_event_count": 1,
         "intervention_not_evaluated": True,
+        "fullkv_correctness_status": "correct",
+        "rkv_correctness_status": "correct",
+        "rkv_natural_cap_hit": False,
+        "observed_compaction_event_count": 1,
+        "eligible_scored_event_count": 1,
+    }
+
+
+def placement_evidence():
+    return {
+        "requested_device": "cuda:0",
+        "every_parameter_on_cuda": True,
+        "no_offload_verified": True,
+        "parameter_count": 100,
+        "unique_device_types": ["cuda"],
+        "unique_devices": ["cuda:0"],
+        "hf_device_map": None,
+    }
+
+
+def device_evidence():
+    return {
+        "verified": True,
+        "visible_gpu_count": 1,
+        "gpu_name": "NVIDIA GeForce RTX 3090",
+        "device_index": 0,
+        "requested_device": "cuda:0",
+        "total_vram_bytes": 24 * 1024**3,
+        "compute_capability": [8, 6],
+        "driver_version": "synthetic-driver",
+        "cuda_runtime": "synthetic-cuda",
+        "cudnn_version": "synthetic-cudnn",
     }
 
 
@@ -121,7 +158,14 @@ def result(ordinal, *, a=0.0, b=0.0, margin=False, noop=True):
         "model_revision": MODEL_REVISION,
         "tokenizer_revision": TOKENIZER_REVISION,
         "rkv_revision": RKV_REVISION,
+        "dataset_repo": "synthetic-dataset",
+        "dataset_revision": "synthetic-revision",
+        "manifest_hash": "1" * 64,
+        "prompt_token_ids_sha256": "2" * 64,
+        "prompt_token_count": 10,
         "architecture": {"num_attention_heads": 12, "num_key_value_heads": 2},
+        "parameter_placement": placement_evidence(),
+        "device_evidence": device_evidence(),
         "candidate_ordinal": ordinal,
         "unique_id": f"row-{ordinal}",
         "selected_event": {
@@ -162,6 +206,11 @@ def result(ordinal, *, a=0.0, b=0.0, margin=False, noop=True):
             pair("no_op", 0.0, candidate=9),
         ],
         "noop_exact": noop,
+        "qualified": True,
+        "selected_event_replay_valid": True,
+        "rkv_natural_cap_hit": False,
+        "natural_full_token_count": 100,
+        "final_cache_length_per_layer": {"0": 80},
         "fixed_trace_extracted_answer": "1",
         "fixed_trace_correctness_status": "correct",
         "free_running_answer_flip_available": False,
@@ -201,6 +250,15 @@ def test_noop_mismatch_voids_result():
         [result(0), result(1, noop=False), result(2)],
     )
     assert summary["classification"] == "void"
+
+
+def test_arm_a_threshold_count_is_over_primitive_candidates_not_only_maxima():
+    summary = _summarize(
+        [qualification(index) for index in range(3)],
+        [result(index, a=0.03) for index in range(3)],
+    )
+    assert summary["arm_a_gains_above_0_01"] == 6
+    assert summary["arm_a_bounded_maxima_above_0_01"] == 3
 
 
 def test_incomplete_pair_population_voids_result():
@@ -256,6 +314,74 @@ def test_incorrect_answer_token_margin_sign_change_is_not_arm_c_movement():
     assert summary["primitive_populations_reconstructed"] is True
     assert summary["behavioural_change"] is False
     assert summary["classification"] == "mechanism_killed_at_1_5b"
+
+
+def test_fullkv_rkv_raw_binding_is_reconstructed_from_primitives():
+    rkv = result(0)
+    rkv["qualification"] = qualification(0)
+    fullkv = {
+        "candidate_ordinal": 0,
+        "role": "fullkv",
+        "model_revision": MODEL_REVISION,
+        "tokenizer_revision": TOKENIZER_REVISION,
+        "dataset_repo": "synthetic-dataset",
+        "dataset_revision": "synthetic-revision",
+        "manifest_hash": "1" * 64,
+        "prompt_token_ids_sha256": "2" * 64,
+        "prompt_token_count": 10,
+        "dataset_row_identity": {"unique_id": "row-0"},
+        "natural_answer_status": "correct",
+        "cap_hit": False,
+        "actual_batch_size_verified": True,
+        "parameter_placement": placement_evidence(),
+        "device_evidence": device_evidence(),
+    }
+    assert _raw_worker_binding_valid(fullkv, rkv)
+    fullkv["dataset_row_identity"]["unique_id"] = "different-row"
+    assert not _raw_worker_binding_valid(fullkv, rkv)
+    fullkv["dataset_row_identity"]["unique_id"] = "row-0"
+    rkv["rkv_natural_cap_hit"] = True
+    assert not _raw_worker_binding_valid(fullkv, rkv)
+
+
+def test_exhausted_budget_never_launches_a_worker(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "kvcot.discovery.diagnostic_pilot_execute.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not launch")),
+    )
+    with pytest.raises(DiagnosticExecutionRefused, match="was not launched"):
+        _launch_worker(
+            role="diagnostic-rkv",
+            ordinal=0,
+            output=tmp_path / "result.json",
+            config_path=tmp_path / "config.yaml",
+            prompts_path=tmp_path / "prompts.json",
+            attempt_id="attempt",
+            timeout=0.0,
+        )
+
+
+def test_late_exception_adds_failure_marker_without_rewriting_success_files(tmp_path):
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    claim_path = tmp_path / "claim.json"
+    claim_path.write_text("{}\n", encoding="utf-8")
+    completion = {"completed": True, "retry_allowed": False}
+    final = {"attempt_id": "attempt", "scientific_summary": {"classification": "synthetic"}}
+    atomic_write_json(attempt / "completion.json", completion)
+    atomic_write_json(attempt / "final.json", final)
+    _preserve_consumed_failure(
+        attempt=attempt,
+        attempt_id="attempt",
+        claim_path=claim_path,
+        started=time.perf_counter(),
+        exc=RuntimeError("late finalization failure"),
+    )
+    assert json.loads((attempt / "completion.json").read_text()) == completion
+    assert json.loads((attempt / "final.json").read_text()) == final
+    failure = json.loads((attempt / "failure.json").read_text())
+    assert failure["failure_message"] == "late finalization failure"
+    assert failure["retry_allowed"] is False
 
 
 def test_fewer_than_three_qualified_is_mechanically_unqualified():
@@ -328,12 +454,13 @@ def test_dry_run_is_non_consuming_and_requests_no_cuda_or_weights(tmp_path, monk
     repository, document, claim, output_root = write_authorization(tmp_path)
     monkeypatch.setattr(
         "kvcot.discovery.diagnostic_pilot_execute.verify_runtime_inputs",
-        lambda _path: {
+        lambda _path, **_kwargs: {
             "canonical_sha256": "b" * 64,
             "protocol_document_sha256": sha256_file(repository / PROTOCOL_DOCUMENT_PATH),
             "config_byte_sha256": sha256_file(repository / CONFIG_PATH),
             "model_snapshot_path": "/exact/model",
             "tokenizer_snapshot_path": "/exact/tokenizer",
+            "output_root": str(output_root),
         },
     )
 
@@ -372,8 +499,8 @@ def test_fake_worker_coordinator_writes_reconstructable_immutable_attempt(tmp_pa
     )
     monkeypatch.setattr(
         "kvcot.discovery.diagnostic_pilot_execute.verify_runtime_inputs",
-        lambda _path: {
-            "protocol_document_sha256": "c" * 64,
+        lambda _path, **_kwargs: {
+            "protocol_document_sha256": sha256_file(repository / PROTOCOL_DOCUMENT_PATH),
             "canonical_sha256": "b" * 64,
             "candidate_prompts_path": str(tmp_path / "prompts.json"),
         },
@@ -383,6 +510,20 @@ def test_fake_worker_coordinator_writes_reconstructable_immutable_attempt(tmp_pa
         if role == "fullkv":
             payload = {
                 "candidate_ordinal": ordinal,
+                "role": "fullkv",
+                "model_revision": MODEL_REVISION,
+                "tokenizer_revision": TOKENIZER_REVISION,
+                "dataset_repo": "synthetic-dataset",
+                "dataset_revision": "synthetic-revision",
+                "manifest_hash": "1" * 64,
+                "prompt_token_ids_sha256": "2" * 64,
+                "prompt_token_count": 10,
+                "dataset_row_identity": {"unique_id": f"row-{ordinal}"},
+                "natural_answer_status": "correct",
+                "cap_hit": False,
+                "actual_batch_size_verified": True,
+                "parameter_placement": placement_evidence(),
+                "device_evidence": device_evidence(),
                 "peak_cuda_allocated_bytes": 10,
                 "peak_cuda_reserved_bytes": 20,
             }
@@ -411,8 +552,19 @@ def test_fake_worker_coordinator_writes_reconstructable_immutable_attempt(tmp_pa
     assert json.loads((attempt / "scientific_summary.json").read_text())["classification"] == (
         "mechanism_killed_at_1_5b"
     )
+    completion = json.loads((attempt / "completion.json").read_text())
+    assert completion["peak_cuda_allocated_bytes"] == 10
+    assert completion["peak_cuda_reserved_bytes"] == 20
+    assert completion["peak_tracked_cuda_bytes"] == 20
     final_path = attempt / "final.json"
-    final = json.loads(final_path.read_text(encoding="utf-8"))
+    original_final_text = final_path.read_text(encoding="utf-8")
+    final = json.loads(original_final_text)
+    final["scientific_summary"]["classification"] = "void"
+    final_path.write_text(json.dumps(final, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(Exception, match="embedded scientific summary"):
+        verify_attempt(attempt)
+    final_path.write_text(original_final_text, encoding="utf-8")
+    final = json.loads(original_final_text)
     final["claim_canonical_sha256"] = "0" * 64
     final_path.write_text(json.dumps(final, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     with pytest.raises(Exception, match="claim canonical hash mismatch"):
@@ -427,7 +579,9 @@ def test_post_claim_setup_failure_is_preserved_inside_attempt(tmp_path, monkeypa
     )
     monkeypatch.setattr(
         "kvcot.discovery.diagnostic_pilot_execute.verify_runtime_inputs",
-        lambda _path: (_ for _ in ()).throw(RuntimeError("synthetic runtime setup failure")),
+        lambda _path, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("synthetic runtime setup failure")
+        ),
     )
     with pytest.raises(RuntimeError, match="synthetic runtime setup failure"):
         run_diagnostic_pilot(repository_root=repository, authorization_document=document)
@@ -463,7 +617,7 @@ def test_every_post_claim_setup_boundary_preserves_failure(
     )
     monkeypatch.setattr(
         "kvcot.discovery.diagnostic_pilot_execute.verify_runtime_inputs",
-        lambda _path: {
+        lambda _path, **_kwargs: {
             "protocol_document_sha256": "c" * 64,
             "canonical_sha256": "b" * 64,
             "candidate_prompts_path": str(tmp_path / "prompts.json"),

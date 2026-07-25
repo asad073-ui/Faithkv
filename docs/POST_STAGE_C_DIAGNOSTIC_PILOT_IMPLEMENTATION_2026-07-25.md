@@ -81,3 +81,18 @@ identity, the 12-query-head/2-KV-head architecture, candidate ranks and
 control identity, per-head mutation counts and donor slots, and primitive
 answer-token log probabilities before accepting any derived projection or
 summary.
+
+Runtime verification reconstructs every candidate prompt from the exact
+candidate-manifest row and pinned tokenizer and requires exact agreement with
+the external prompt artifact, including qualification order. The execution
+authorization output root must equal the runtime binding. Reconstruction also
+re-derives FullKV/R-KV row identity, correctness, placement/device evidence,
+compression, cap status, qualification, and completion limits from raw worker
+records; embedded final summary/completion copies must equal their referenced
+files.
+
+No worker is launched with a nonpositive remaining budget, R-KV cap hits fail
+mechanical qualification, and a result cannot complete beyond the 5,400-second
+ceiling. Allocated and reserved CUDA peaks remain separate while their maximum
+is the tracked ceiling value. Any exception after success-shaped immutable
+artifacts appear adds a distinct failure marker without rewriting evidence.

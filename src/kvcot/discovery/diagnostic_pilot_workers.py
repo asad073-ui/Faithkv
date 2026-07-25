@@ -565,6 +565,7 @@ def run_rkv_diagnostic_worker(config: Any, manifest: Any, fullkv_result: dict[st
     from kvcot.generation.provenance import LayerProvenance, ModelProvenance
     from kvcot.generation.replay import CompactionTracker
     from kvcot.generation.state import reset_patched_state
+    from kvcot.utils.hashing import sha256_int_ids
 
     started = time.perf_counter()
     if not torch.cuda.is_available():
@@ -575,8 +576,8 @@ def run_rkv_diagnostic_worker(config: Any, manifest: Any, fullkv_result: dict[st
     tokenizer_snapshot = resolve_local_snapshot(config.model.tokenizer_name, config.model.tokenizer_revision, "tokenizer")
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_snapshot.local_path, local_files_only=True, use_fast=True)
     rendered_ids = list(manifest.prompt_token_ids)
-    if rendered_ids != list(manifest.prompt_token_ids):
-        raise DiagnosticWorkerRefused("frozen prompt token IDs changed")
+    if sha256_int_ids(rendered_ids) != manifest.prompt_token_ids_sha256:
+        raise DiagnosticWorkerRefused("frozen prompt token-ID hash mismatch")
     model = load_rkv_discovery_model(config, model_snapshot.local_path, tokenizer_snapshot.local_path, "cuda:0")
     assert_no_offloaded_parameters(model)
     runtime_identity_obj = derive_runtime_identity(
@@ -699,7 +700,7 @@ def run_rkv_diagnostic_worker(config: Any, manifest: Any, fullkv_result: dict[st
         "candidate_ordinal": None,
         "unique_id": manifest.unique_id,
         "fullkv_execution_valid": fullkv_valid,
-        "rkv_replay_mechanically_valid": pass2_valid,
+        "rkv_replay_mechanically_valid": pass2_valid and trace.cap_hit is False,
         "correctness_status_matched": fullkv_status == rkv_status,
         "meaningful_compression": meaningful_compression,
         "eligible_event_exists": bool(scored_events),
@@ -711,6 +712,7 @@ def run_rkv_diagnostic_worker(config: Any, manifest: Any, fullkv_result: dict[st
         "fullkv_correctness_status": fullkv_status,
         "rkv_correctness_status": rkv_status,
         "pass2_invalid_reason": pass2_reason,
+        "rkv_natural_cap_hit": trace.cap_hit,
         "observed_compaction_event_count": len(trace.compaction_events),
         "eligible_event_plan_count": len(event_plans),
         "eligible_scored_event_count": len(scored_events),
@@ -819,6 +821,11 @@ def run_rkv_diagnostic_worker(config: Any, manifest: Any, fullkv_result: dict[st
     result = {
         "role": "diagnostic_rkv",
         "unique_id": manifest.unique_id,
+        "dataset_repo": manifest.dataset_repo,
+        "dataset_revision": manifest.dataset_revision,
+        "manifest_hash": manifest.manifest_hash(),
+        "prompt_token_ids_sha256": manifest.prompt_token_ids_sha256,
+        "prompt_token_count": len(manifest.prompt_token_ids),
         "model_revision": MODEL_REVISION,
         "tokenizer_revision": TOKENIZER_REVISION,
         "rkv_revision": RKV_REVISION,
@@ -830,6 +837,13 @@ def run_rkv_diagnostic_worker(config: Any, manifest: Any, fullkv_result: dict[st
         "frozen_rkv_config_hash": runtime_rkv.frozen_hash,
         "qualification": qualification,
         "qualified": qualifies,
+        "selected_event_replay_valid": pass2_valid,
+        "rkv_natural_cap_hit": trace.cap_hit,
+        "natural_full_token_count": len(trace.full_token_ids),
+        "final_cache_length_per_layer": {
+            str(layer): int(length)
+            for layer, length in trace.cache_length_final_per_layer.items()
+        },
         "eligible_event_score_evidence": [
             {
                 "event_index": row.event_plan.compaction_event_id,

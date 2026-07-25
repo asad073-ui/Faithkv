@@ -3198,7 +3198,7 @@ def cmd_verify_post_stage_c_diagnostic_pilot(args: argparse.Namespace) -> int:
         else:
             from kvcot.discovery.diagnostic_pilot_prepare import verify_runtime_inputs
 
-            result = verify_runtime_inputs(args.runtime_config)
+            result = verify_runtime_inputs(args.runtime_config, repository_root=".")
     except Exception as exc:  # noqa: BLE001
         print(f"verify-post-stage-c-diagnostic-pilot: VERIFICATION FAILED: {exc}", file=sys.stderr)
         return 2

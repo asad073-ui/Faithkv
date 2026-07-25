@@ -19,6 +19,11 @@
   the authorization; preflight binds the checked-out protocol, config, and
   manifest bytes, and reconstruction validates architecture, mutation, and
   answer-margin primitives before accepting aggregates.
+- Runtime verification reconstructs frozen prompts with the pinned tokenizer,
+  binds the authorization/runtime output root, re-derives FullKV/R-KV and
+  final-file evidence, rejects R-KV cap hits and exhausted launch budgets,
+  preserves late failure markers, and reports allocated/reserved peaks and
+  primitive Arm-A threshold counts without conflation.
 - No Stage-C code/evidence/claim/attempt changed; no GPU run, B2B run, model
   weights, claim, or attempt artifact is committed by this entry.
 
