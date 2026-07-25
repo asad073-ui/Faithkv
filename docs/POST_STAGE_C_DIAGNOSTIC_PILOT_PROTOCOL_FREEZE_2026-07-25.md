@@ -49,6 +49,15 @@ tokens in the selected event; and no intervention result yet evaluated for
 that example. For each selected example choose the eligible event with the
 greatest existing deployable event score, breaking ties by lower event index.
 
+For every eligible event, derive its layer/head before score capture using
+the repository's existing deterministic `select_layer` and `select_kv_head`
+functions, seed 13 and the frozen example/model/R-KV identity. The depth
+stratum supplied to `select_layer` is `event_index mod 3`. At that frozen
+layer/head, the deployable event score is the greatest existing R-KV final
+score among eligible evicted tokens. Break a remaining event tie by lower
+event index, then lower layer and KV-head index. This rule consumes no
+intervention result.
+
 Qualification and event selection must not inspect swap gain, intervention
 answer-token margins, intervention extracted answers, intervention
 correctness, or candidate intervention outcomes. If fewer than three qualify
@@ -75,10 +84,27 @@ The maximum gain is a bounded candidate-selection upper bound and is always
 labeled diagnostic, never deployable performance. No scorer is trained or
 introduced.
 
+The donor rule is the existing seeded `select_candidates_and_donors` rule at
+the selected event/layer/head; the first returned donor is used for every
+candidate and width arm. Thus donor identity is frozen before any
+intervention and cannot vary with candidate gain. An event is mechanically
+ineligible if that donor absolute identity has no corresponding post-event
+slot in either KV head, or if its rank-zero score-selected candidate has no
+pre-event K/V identity in either KV head. Both checks occur before the row is
+declared qualified or any intervention is evaluated.
+
 Arm B uses only the current score-selected candidate and selected layer. It
 restores that candidate into both KV heads `{0,1}` at the corresponding donor
 slot for each head, changing only KV-head width. Key and value are both
 restored; absolute positions and cache length do not change.
+
+Event ranking uses one fixed-token score replay that immediately reduces each
+target capture to candidate identities and deployable scores and releases its
+cache tensors; it retains no full-model snapshots. After the event is frozen,
+one additional fixed-token replay captures exactly one complete post-event
+snapshot for branch evaluation. The selected-event replay must reproduce the
+frozen candidate pool exactly. This preserves the all-event ranking rule
+without retaining an unbounded population of model-state snapshots.
 
 Arm C reuses each branch's teacher-forced computations. For every answer-span
 token position available in the evaluated branch it records the reference
@@ -126,7 +152,16 @@ point. The result does not confirm or refute the immutable 8B R2 null.
 | Automatic retries | 0 |
 | Seed | 13 |
 | Generation mode | greedy (`do_sample=false`) |
+| Maximum new tokens per natural/replay pass | 2,048 |
 | NLL horizon | exactly 48 reference tokens after one unscored bridge token |
+
+The 2,048-token cap bounds the worst-case candidate scan to at most 65,536
+natural/replay decode selections (eight rows, one FullKV pass and at most
+three diagnostic R-KV passes per row), plus at most 1,029 branch feed steps
+(three selected examples, one baseline plus six intervention branches, 49
+feeds each). This workload reduction preserves all three arms, the no-op,
+and three examples where they mechanically qualify; it is frozen so the
+1.5-hour authorization ceiling is not silently enlarged.
 
 The one invocation requires a separate later execution authorization. Claim
 consumption permanently spends it, including on CUDA failure, timeout,
