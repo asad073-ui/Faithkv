@@ -2,6 +2,7 @@ import json
 import sys
 
 import pytest
+import torch
 
 from kvcot.discovery.geometry_pilot_authorization import (
     GeometryAuthorizationAlreadyConsumed,
@@ -26,14 +27,24 @@ from kvcot.discovery.geometry_pilot_execute import (
     run_dry_run,
     run_execute,
 )
+from kvcot.discovery.geometry_pilot_restore import KVMutationSpec
 
 
 def _branch(arm, gain, is_noop=False):
     n = 48
     baseline = [0.5] * n
     swapped = [0.5 - gain] * n
+    # A real (non-empty) mutation list, WITH torch tensors -- this is what
+    # a real GPU run actually produces; an empty tuple here would hide any
+    # bug in serializing KVMutationSpec's tensor fields to JSON.
+    mutation = KVMutationSpec(
+        layer_index=16, kv_head_index=1, token_position=192,
+        replacement_key=torch.arange(4, dtype=torch.float32),
+        replacement_value=torch.arange(4, dtype=torch.float32) + 0.5,
+        donor_absolute_position=192, candidate_absolute_position=1159,
+    )
     return GeometryBranchResult(
-        arm=arm, mutations=(), baseline_per_token_nll=tuple(baseline), swapped_per_token_nll=tuple(swapped),
+        arm=arm, mutations=(mutation,), baseline_per_token_nll=tuple(baseline), swapped_per_token_nll=tuple(swapped),
         baseline_mean_nll=sum(baseline) / n, swapped_mean_nll=sum(swapped) / n, swap_gain=gain,
         is_noop=is_noop, key_slots_changed=0 if is_noop else 1, value_slots_changed=0 if is_noop else 1,
         cache_shape_unchanged=True, provenance_updated_count=0, kept_index_updated_count=0,
@@ -51,6 +62,18 @@ def test_branch_readout_reconstructs_every_primitive_field():
     assert readout["swap_gain"] == pytest.approx(0.02)
     assert len(readout["subwindow_gains_w8"]) == 48 - 8 + 1
     assert len(readout["subwindow_gains_w16"]) == 48 - 16 + 1
+
+
+def test_branch_readout_is_actually_json_serializable_with_real_tensors():
+    """Regression test: `KVMutationSpec.replacement_key`/`replacement_value`
+    are torch tensors -- `json.dumps` must not crash on a branch readout
+    containing real (non-empty) mutations."""
+    result = _branch(ARM_C1, 0.02)
+    readout = branch_readout(result)
+    serialized = json.dumps(readout)  # must not raise
+    reloaded = json.loads(serialized)
+    assert reloaded["mutations"][0]["layer_index"] == 16
+    assert reloaded["mutations"][0]["replacement_key"] == [0.0, 1.0, 2.0, 3.0]
 
 
 def test_scientific_summary_classification_h_when_all_flat_and_noop_exact():

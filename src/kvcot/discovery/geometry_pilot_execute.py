@@ -8,7 +8,7 @@ without a GPU.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, is_dataclass
+from dataclasses import is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -43,14 +43,22 @@ class GeometryExecutionError(RuntimeError):
 
 
 def _to_jsonable(value: Any) -> Any:
+    """`asdict` alone is unsafe here: `KVMutationSpec.replacement_key`/
+    `replacement_value` are `torch.Tensor` fields, and `asdict` deep-copies
+    a dataclass's non-dataclass/list/tuple/dict field values verbatim
+    (never converting a `Tensor` to something `json.dumps` can serialize)
+    -- so every field is walked and converted explicitly instead of
+    delegating to `dataclasses.asdict`."""
     if is_dataclass(value) and not isinstance(value, type):
-        return {k: _to_jsonable(v) for k, v in asdict(value).items()}
+        return {field: _to_jsonable(getattr(value, field)) for field in value.__dataclass_fields__}
     if isinstance(value, tuple):
         return [_to_jsonable(v) for v in value]
     if isinstance(value, list):
         return [_to_jsonable(v) for v in value]
     if isinstance(value, dict):
         return {k: _to_jsonable(v) for k, v in value.items()}
+    if hasattr(value, "tolist") and hasattr(value, "detach"):  # torch.Tensor, without importing torch
+        return value.detach().cpu().tolist()
     return value
 
 
