@@ -33,6 +33,7 @@ from kvcot.discovery.diagnostic_pilot_contract import (
     TOKENIZER_REVISION,
     VRAM_LIMIT_BYTES,
     DiagnosticGeneration,
+    assert_no_cross_generation_path_collision,
     attach_canonical_hash,
     generation_by_label,
     generation_for_protocol_document_path,
@@ -198,6 +199,12 @@ def prepare_runtime_inputs(
     implementation_sha_fields = _implementation_sha_fields(pilot_generation, implementation_sha)
     if runtime_root == output_root:
         raise DiagnosticPreparationRefused("runtime root and output root must differ")
+    try:
+        assert_no_cross_generation_path_collision(
+            pilot_generation, {"runtime root": runtime_root, "output root": output_root}
+        )
+    except ValueError as exc:
+        raise DiagnosticPreparationRefused(str(exc)) from exc
     candidate_manifest = _load_candidate_manifest(repository_root)
     config_path = repository_root / CONFIG_PATH
     config = load_discovery_config(config_path)

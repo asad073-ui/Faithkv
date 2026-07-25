@@ -159,7 +159,14 @@ the missing width-two cells.
 
 ## 4. Classification categories
 
-Exactly one category is assigned, in this precedence order.
+Exactly one category is assigned, in this precedence order. Precedence is
+evaluated over the pooled cells of all selected examples, and it is what makes
+the "while X does not" qualifiers in B, C and D self-enforcing: by the time B is
+reached, no rank-zero width-one cell anywhere exceeded 0.01, so the
+same-example qualifier in B is already satisfied; by the time C and D are
+reached, no width-one cell anywhere exceeded 0.01, so the same-candidate
+qualifier in C is already satisfied. The qualifiers are stated below for
+readability and are never evaluated independently of this ordering.
 
 **H. Void.** Execution, evidence, no-op, binding or reconstruction fails. No
 scientific interpretation.

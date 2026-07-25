@@ -26,6 +26,7 @@ from kvcot.discovery.diagnostic_pilot_contract import (
     REPOSITORY,
     RKV_REVISION,
     TOKENIZER_REVISION,
+    assert_no_cross_generation_path_collision,
     attach_canonical_hash,
     execution_command_document_argument,
     generation_for_authorization_document,
@@ -206,23 +207,31 @@ def test_document_not_named_by_its_own_command_is_rejected(tmp_path):
         parse_authorization_document(document)
 
 
+R1_OUTPUT = R1_GENERATION.default_output_root
+R1_RUNTIME = R1_GENERATION.default_runtime_root
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("output_root", R1_GENERATION.default_output_root, "output root collides"),
+        # Every R2 path against BOTH R1 roots, in both containment
+        # directions.  A same-kind-only guard would let an R2 attempt tree
+        # be written into R1's immutable runtime root.
+        ("output_root", R1_OUTPUT, "output root collides"),
+        ("output_root", f"{R1_OUTPUT}/nested", "output root collides"),
+        ("output_root", R1_RUNTIME, "output root collides"),
+        ("output_root", f"{R1_RUNTIME}/nested", "output root collides"),
+        ("output_root", "/workspace", "output root collides"),
+        ("claim_path", f"{R1_OUTPUT}/authorization-claim.json", "claim path collides"),
+        ("claim_path", f"{R1_RUNTIME}/authorization-claim.json", "claim path collides"),
         (
-            "output_root",
-            f"{R1_GENERATION.default_output_root}/nested",
-            "output root collides",
-        ),
-        (
-            "claim_path",
-            f"{R1_GENERATION.default_output_root}/authorization-claim.json",
-            "claim path collides",
+            "runtime_config_path",
+            f"{R1_RUNTIME}/runtime_config.json",
+            "runtime config path collides",
         ),
         (
             "runtime_config_path",
-            f"{R1_GENERATION.default_runtime_root}/runtime_config.json",
+            f"{R1_OUTPUT}/runtime_config.json",
             "runtime config path collides",
         ),
     ],
@@ -235,6 +244,29 @@ def test_r2_authorization_cannot_collide_with_consumed_r1_paths(
     )
     with pytest.raises(DiagnosticAuthorizationRefused, match=message):
         parse_authorization_document(document)
+
+
+def test_collision_guard_covers_the_full_path_by_root_cross_product():
+    """Both directions, both root kinds, for every named path."""
+    for label in ("output root", "claim path", "runtime config path"):
+        for root in (R1_OUTPUT, R1_RUNTIME):
+            for value in (root, f"{root}/nested/deeper"):
+                with pytest.raises(ValueError, match="collides with the r1"):
+                    assert_no_cross_generation_path_collision(
+                        R2_GENERATION, {label: value}
+                    )
+    # A generation is never in collision with its own roots.
+    assert_no_cross_generation_path_collision(
+        R2_GENERATION,
+        {
+            "output root": R2_GENERATION.default_output_root,
+            "runtime root": R2_GENERATION.default_runtime_root,
+            "claim path": f"{R2_GENERATION.default_output_root}/authorization-claim.json",
+        },
+    )
+    assert_no_cross_generation_path_collision(
+        R1_GENERATION, {"output root": R1_OUTPUT, "runtime root": R1_RUNTIME}
+    )
 
 
 def test_r2_default_paths_are_disjoint_from_r1():

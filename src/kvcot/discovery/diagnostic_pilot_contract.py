@@ -178,6 +178,39 @@ def generation_for_authorization_document(path: str | Path) -> DiagnosticGenerat
     )
 
 
+def _within(child: Path, parent: Path) -> bool:
+    return child == parent or parent in child.parents
+
+
+def assert_no_cross_generation_path_collision(
+    generation: DiagnosticGeneration, paths: dict[str, Any]
+) -> None:
+    """Keep one generation entirely clear of every other generation's roots.
+
+    Each supplied path is checked against *both* the output root and the
+    runtime root of *every* other generation, in *both* containment
+    directions.  The full cross product matters: a later generation that
+    named an earlier generation's runtime root as its output root would
+    write a complete attempt tree into immutable evidence, even though the
+    earlier generation's own files stayed byte-identical.
+
+    Raises ``ValueError`` naming the offending path and root.
+    """
+    for label, value in paths.items():
+        resolved = Path(value).resolve()
+        for other in GENERATIONS:
+            if other is generation:
+                continue
+            for root_label, root in (
+                ("output root", Path(other.default_output_root)),
+                ("runtime root", Path(other.default_runtime_root)),
+            ):
+                if _within(resolved, root) or _within(root, resolved):
+                    raise ValueError(
+                        f"{label} collides with the {other.label} {root_label}"
+                    )
+
+
 def execution_command_document_argument(command: str) -> str:
     """Extract the ``--authorization-document`` argument of an exact command."""
     match = _EXECUTION_COMMAND_PATTERN.fullmatch(command.strip())

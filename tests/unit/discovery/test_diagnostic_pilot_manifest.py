@@ -17,6 +17,7 @@ from kvcot.discovery.diagnostic_pilot_manifest import (
 )
 from kvcot.discovery.diagnostic_pilot_prepare import (
     DiagnosticPreparationRefused,
+    prepare_runtime_inputs,
     _implementation_sha_fields,
     _pair_budget_fields,
     _verify_candidate_prompt_bindings,
@@ -257,3 +258,46 @@ def test_runtime_pair_budget_vocabulary_is_generation_specific():
         "maximum_pairs_per_selected_example": 9,
         "maximum_total_pairs": 27,
     }
+
+
+def test_preparation_refuses_roots_belonging_to_another_generation(tmp_path):
+    """R2 cannot be prepared into R1's immutable roots, and vice versa."""
+    for bad_root in (
+        R1_GENERATION.default_output_root,
+        R1_GENERATION.default_runtime_root,
+    ):
+        with pytest.raises(DiagnosticPreparationRefused, match="collides with the r1"):
+            prepare_runtime_inputs(
+                repository_root=tmp_path,
+                runtime_root=bad_root,
+                output_root=R2_GENERATION.default_output_root,
+                generation="r2",
+                implementation_sha="a" * 40,
+            )
+        with pytest.raises(DiagnosticPreparationRefused, match="collides with the r1"):
+            prepare_runtime_inputs(
+                repository_root=tmp_path,
+                runtime_root=R2_GENERATION.default_runtime_root,
+                output_root=bad_root,
+                generation="r2",
+                implementation_sha="a" * 40,
+            )
+
+
+def test_preparation_requires_an_absolute_canonical_output_root(tmp_path):
+    with pytest.raises(DiagnosticPreparationRefused, match="absolute"):
+        prepare_runtime_inputs(
+            repository_root=tmp_path,
+            runtime_root=R2_GENERATION.default_runtime_root,
+            output_root="relative/output",
+            generation="r2",
+            implementation_sha="a" * 40,
+        )
+    with pytest.raises(DiagnosticPreparationRefused, match="must differ"):
+        prepare_runtime_inputs(
+            repository_root=tmp_path,
+            runtime_root=R2_GENERATION.default_output_root,
+            output_root=R2_GENERATION.default_output_root,
+            generation="r2",
+            implementation_sha="a" * 40,
+        )

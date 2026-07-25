@@ -15,7 +15,6 @@ from kvcot.discovery.diagnostic_pilot_contract import (
     BRANCH,
     CLAIM_SCHEMA_VERSION,
     CANDIDATE_MANIFEST_CANONICAL_SHA256,
-    GENERATIONS,
     MAXIMUM_CANDIDATE_POOL_SIZE,
     MAXIMUM_INVOCATIONS,
     MAXIMUM_QUALIFICATION_CANDIDATES,
@@ -29,6 +28,7 @@ from kvcot.discovery.diagnostic_pilot_contract import (
     TOKENIZER_REVISION,
     VRAM_LIMIT_BYTES,
     DiagnosticGeneration,
+    assert_no_cross_generation_path_collision,
     attach_canonical_hash,
     execution_command_document_argument,
     generation_for_authorization_document,
@@ -74,10 +74,6 @@ def _pair_budget_requirements(generation: DiagnosticGeneration) -> dict[str, Any
     }
 
 
-def _within(child: Path, parent: Path) -> bool:
-    return child == parent or parent in child.parents
-
-
 def _assert_no_cross_generation_collision(
     generation: DiagnosticGeneration, payload: dict[str, Any]
 ) -> None:
@@ -85,28 +81,20 @@ def _assert_no_cross_generation_collision(
 
     The consumed R1 claim, output root, and runtime root are immutable
     evidence.  A later generation must never be able to name, nest under,
-    or contain them.
+    or contain any of them -- including naming an earlier generation's
+    runtime root as its own output root.
     """
-    output_root = Path(payload["output_root"]).resolve()
-    claim_path = Path(payload["claim_path"]).resolve()
-    runtime_config_path = Path(payload["runtime_config_path"]).resolve()
-    for other in GENERATIONS:
-        if other is generation:
-            continue
-        other_output = Path(other.default_output_root)
-        other_runtime = Path(other.default_runtime_root)
-        if _within(output_root, other_output) or _within(other_output, output_root):
-            raise DiagnosticAuthorizationRefused(
-                f"output root collides with the {other.label} output root"
-            )
-        if _within(claim_path, other_output):
-            raise DiagnosticAuthorizationRefused(
-                f"claim path collides with the {other.label} output root"
-            )
-        if _within(runtime_config_path, other_runtime):
-            raise DiagnosticAuthorizationRefused(
-                f"runtime config path collides with the {other.label} runtime root"
-            )
+    try:
+        assert_no_cross_generation_path_collision(
+            generation,
+            {
+                "output root": payload["output_root"],
+                "claim path": payload["claim_path"],
+                "runtime config path": payload["runtime_config_path"],
+            },
+        )
+    except ValueError as exc:
+        raise DiagnosticAuthorizationRefused(str(exc)) from exc
 
 
 def parse_authorization_document(path: str | Path) -> VerifiedDiagnosticAuthorization:
