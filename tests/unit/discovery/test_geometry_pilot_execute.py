@@ -145,6 +145,37 @@ def test_run_dry_run_never_touches_cuda_or_torch(tmp_path, monkeypatch):
     assert result["claim_absent"] is True
 
 
+class _FakeRkv:
+    upstream_revision = "f" * 40
+
+
+class _FakeConfig:
+    rkv = _FakeRkv()
+
+
+def _fake_capture():
+    from kvcot.discovery.geometry_pilot_workers import GeometryAnchorCapture
+
+    return GeometryAnchorCapture(
+        example_id="test/fake/1.json",
+        model_revision="e" * 40,
+        tokenizer_revision="e" * 40,
+        natural_answer="36",
+        natural_answer_status="correct",
+        natural_generated_token_count=10,
+        layer_set={"available": False, "unavailable_reason": "fewer_than_two_valid_layers", "valid_layer_indices": []},
+        span_availability={"available": False, "unavailable_reason": "position_x_outside_eligible_region"},
+        pristine_snapshot=None,
+        mutations_by_arm={},
+        bridge_token_id=0,
+        reference_token_ids=[],
+        branch_step_fn=None,
+        started_at=0.0,
+        cuda_available=False,
+        cuda=None,
+    )
+
+
 def test_run_execute_creates_claim_and_attempt_dir_then_refuses_retry(tmp_path, monkeypatch):
     doc = tmp_path / "docs" / "AUTH.md"
     doc.parent.mkdir(parents=True)
@@ -154,24 +185,29 @@ def test_run_execute_creates_claim_and_attempt_dir_then_refuses_retry(tmp_path, 
     class FakeManifest:
         unique_id = "test/fake/1.json"
 
-    class FakeWorkerResult:
-        example_id = "test/fake/1.json"
-        natural_answer = "36"
-        natural_answer_status = "correct"
-        natural_generated_token_count = 10
-        layer_set = {"available": False, "unavailable_reason": "fewer_than_two_valid_layers", "valid_layer_indices": []}
-        span_availability = {"available": False, "unavailable_reason": "position_x_outside_eligible_region"}
-        branch_results = (_branch(ARM_C1, 0.001), _branch(ARM_NOOP, 0.0, is_noop=True))
-        peak_cuda_allocated_bytes = 123
-        peak_cuda_reserved_bytes = 456
-        wall_seconds = 1.23
+    fake_branches = (_branch(ARM_C1, 0.001), _branch(ARM_NOOP, 0.0, is_noop=True))
 
     import kvcot.discovery.geometry_pilot_workers as workers_mod
 
-    monkeypatch.setattr(workers_mod, "run_geometry_worker", lambda config, manifest: FakeWorkerResult())
+    monkeypatch.setattr(workers_mod, "capture_geometry_anchor", lambda config, manifest: _fake_capture())
+
+    def fake_evaluate(capture, *, rkv_revision):
+        from kvcot.discovery.geometry_pilot_workers import GeometryWorkerResult
+
+        return GeometryWorkerResult(
+            example_id=capture.example_id, model_revision=capture.model_revision,
+            tokenizer_revision=capture.tokenizer_revision, rkv_revision=rkv_revision,
+            natural_answer=capture.natural_answer, natural_answer_status=capture.natural_answer_status,
+            natural_generated_token_count=capture.natural_generated_token_count,
+            layer_set=capture.layer_set, span_availability=capture.span_availability,
+            branch_results=fake_branches, peak_cuda_allocated_bytes=123, peak_cuda_reserved_bytes=456,
+            wall_seconds=1.23,
+        )
+
+    monkeypatch.setattr(workers_mod, "evaluate_geometry_branches", fake_evaluate)
 
     result = run_execute(
-        repository_root=tmp_path, binding=binding, config=object(), manifest=FakeManifest(),
+        repository_root=tmp_path, binding=binding, config=_FakeConfig(), manifest=FakeManifest(),
         authorized_repository="asad073-ui/Faithkv",
         authorized_branch="research/8b-structured-restoration-geometry",
         observed_execution_commit_sha="1" * 40,
@@ -183,11 +219,59 @@ def test_run_execute_creates_claim_and_attempt_dir_then_refuses_retry(tmp_path, 
 
     with pytest.raises(GeometryAuthorizationAlreadyConsumed):
         run_execute(
-            repository_root=tmp_path, binding=binding, config=object(), manifest=FakeManifest(),
+            repository_root=tmp_path, binding=binding, config=_FakeConfig(), manifest=FakeManifest(),
             authorized_repository="asad073-ui/Faithkv",
             authorized_branch="research/8b-structured-restoration-geometry",
             observed_execution_commit_sha="1" * 40,
         )
+
+
+def test_layer_set_and_span_availability_persisted_before_any_branch_evaluated(tmp_path, monkeypatch):
+    """Regression test for the ordering defect an independent audit found:
+    `layer_set.json`/`span_availability.json` must exist on disk BEFORE
+    `evaluate_geometry_branches` (the function that computes swap gains) is
+    even called -- never merely computed-in-memory-first."""
+    doc = tmp_path / "docs" / "AUTH.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("frozen\n")
+    binding = _binding("docs/AUTH.md", sha256_file(doc))
+
+    class FakeManifest:
+        unique_id = "test/fake/1.json"
+
+    import kvcot.discovery.geometry_pilot_workers as workers_mod
+
+    monkeypatch.setattr(workers_mod, "capture_geometry_anchor", lambda config, manifest: _fake_capture())
+
+    observed_files_at_evaluate_time = {}
+
+    def fake_evaluate(capture, *, rkv_revision):
+        from kvcot.discovery.geometry_pilot_workers import GeometryWorkerResult
+
+        attempt_dirs = list((tmp_path / "results" / "decisions").glob("geometry_pilot_attempt_*"))
+        assert len(attempt_dirs) == 1
+        observed_files_at_evaluate_time["layer_set_exists"] = (attempt_dirs[0] / "layer_set.json").is_file()
+        observed_files_at_evaluate_time["span_availability_exists"] = (attempt_dirs[0] / "span_availability.json").is_file()
+        return GeometryWorkerResult(
+            example_id=capture.example_id, model_revision=capture.model_revision,
+            tokenizer_revision=capture.tokenizer_revision, rkv_revision=rkv_revision,
+            natural_answer=capture.natural_answer, natural_answer_status=capture.natural_answer_status,
+            natural_generated_token_count=capture.natural_generated_token_count,
+            layer_set=capture.layer_set, span_availability=capture.span_availability,
+            branch_results=(_branch(ARM_NOOP, 0.0, is_noop=True),), peak_cuda_allocated_bytes=None,
+            peak_cuda_reserved_bytes=None, wall_seconds=0.1,
+        )
+
+    monkeypatch.setattr(workers_mod, "evaluate_geometry_branches", fake_evaluate)
+
+    run_execute(
+        repository_root=tmp_path, binding=binding, config=_FakeConfig(), manifest=FakeManifest(),
+        authorized_repository="asad073-ui/Faithkv",
+        authorized_branch="research/8b-structured-restoration-geometry",
+        observed_execution_commit_sha="1" * 40,
+    )
+    assert observed_files_at_evaluate_time["layer_set_exists"] is True
+    assert observed_files_at_evaluate_time["span_availability_exists"] is True
 
 
 def _basename(path_str):

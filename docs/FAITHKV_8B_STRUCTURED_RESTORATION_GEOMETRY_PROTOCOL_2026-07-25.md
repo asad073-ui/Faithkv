@@ -190,9 +190,11 @@ extraction procedure permits) fixed-trace margin/extracted-answer evidence
 are captured — a free-running answer flip is never claimed.
 
 Classification uses exactly the nine categories A–I defined in the task
-instructions (§11), evaluated in the fixed precedence order H → G → A → B →
-C → D → E → F → I-on-invalidity, implemented in
-`kvcot.discovery.geometry_pilot_contract.classify_geometry_pilot`. The
+instructions (§11), evaluated in the fixed precedence order I (mechanically
+invalid, checked first — an incomplete or non-exact-no-op result is never
+given a scientific interpretation) → A → B → C → D → E → F → G → H,
+implemented in `kvcot.discovery.geometry_pilot_contract
+.classify_geometry_pilot` and enforced by that module's own test suite. The
 `0.01`-nat threshold is unchanged; no new threshold is introduced by this
 protocol.
 

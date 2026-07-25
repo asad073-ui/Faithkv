@@ -156,12 +156,20 @@ def run_execute(
     observed_execution_commit_sha: str,
 ) -> dict[str, Any]:
     """Consumes the one-use claim, then runs the real GPU worker exactly
-    once. Claim creation happens BEFORE the worker is invoked -- an
-    exception from the worker after this point still leaves the
-    authorization consumed (matching this repository's existing Stage-C
-    contract: 'once inference begins, the attempt is scientifically
-    consumed')."""
-    from kvcot.discovery.geometry_pilot_workers import run_geometry_worker
+    once, in two strictly ordered phases. Claim creation happens BEFORE the
+    worker is invoked -- an exception from the worker after this point
+    still leaves the authorization consumed (matching this repository's
+    existing Stage-C contract: 'once inference begins, the attempt is
+    scientifically consumed').
+
+    Phase A (`capture_geometry_anchor`) captures the frozen anchor's
+    pristine snapshot and resolves the layer-set/span-availability freeze
+    -- NO branch outcome exists yet. `layer_set.json`/
+    `span_availability.json` are written to disk IMMEDIATELY after Phase A
+    returns and STRICTLY BEFORE Phase B (`evaluate_geometry_branches`) is
+    even called, so the freeze is persisted before a single swap gain is
+    computed, not merely computed-in-memory-first."""
+    from kvcot.discovery.geometry_pilot_workers import capture_geometry_anchor, evaluate_geometry_branches
 
     verify_authorization_document_binding(binding, repository_root=repository_root)
 
@@ -184,7 +192,13 @@ def run_execute(
     attempt_dir = Path(repository_root) / "results" / "decisions" / attempt_dir_name
     attempt_dir.mkdir(parents=True, exist_ok=False)
 
-    worker_result = run_geometry_worker(config, manifest)
+    # --- Phase A: capture + pre-outcome freeze. No branch outcome exists yet. ---
+    capture = capture_geometry_anchor(config, manifest)
+    (attempt_dir / "layer_set.json").write_text(json.dumps(capture.layer_set, indent=2) + "\n")
+    (attempt_dir / "span_availability.json").write_text(json.dumps(capture.span_availability, indent=2) + "\n")
+
+    # --- Phase B: evaluate branches. Only now does any swap gain exist. ---
+    worker_result = evaluate_geometry_branches(capture, rkv_revision=config.rkv.upstream_revision)
 
     branch_readouts = {result.arm: branch_readout(result) for result in worker_result.branch_results}
     all_arms = (ARM_C1, ARM_C2, ARM_H, ARM_L, ARM_HL, ARM_S, ARM_SH, ARM_NOOP)
@@ -193,8 +207,6 @@ def run_execute(
 
     summary = build_scientific_summary(branch_readouts)
 
-    (attempt_dir / "layer_set.json").write_text(json.dumps(worker_result.layer_set, indent=2) + "\n")
-    (attempt_dir / "span_availability.json").write_text(json.dumps(worker_result.span_availability, indent=2) + "\n")
     (attempt_dir / "branch_readouts.json").write_text(json.dumps(branch_readouts, indent=2) + "\n")
     (attempt_dir / "scientific_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     (attempt_dir / "worker_meta.json").write_text(

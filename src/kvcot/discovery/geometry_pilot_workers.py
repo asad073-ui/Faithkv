@@ -83,6 +83,36 @@ class GeometryWorkerResult:
     wall_seconds: float
 
 
+@dataclass
+class GeometryAnchorCapture:
+    """Everything resolved BEFORE any branch outcome exists: the natural
+    trace, the frozen anchor's pristine snapshot, the pre-outcome
+    layer-set/span-availability freeze, and the concrete per-arm mutation
+    lists built from that snapshot. Callers (`geometry_pilot_execute
+    .run_execute`) must persist `layer_set`/`span_availability` to disk
+    immediately after this returns and BEFORE calling
+    `evaluate_geometry_branches` -- this dataclass exists specifically so
+    that persistence step can happen strictly between capture and
+    evaluation, never after evaluation has already computed a gain."""
+
+    example_id: str
+    model_revision: str
+    tokenizer_revision: str
+    natural_answer: str | None
+    natural_answer_status: str
+    natural_generated_token_count: int
+    layer_set: dict[str, Any]
+    span_availability: dict[str, Any]
+    pristine_snapshot: Any
+    mutations_by_arm: dict[str, list[KVMutationSpec] | None]
+    bridge_token_id: int
+    reference_token_ids: list[int]
+    branch_step_fn: Any
+    started_at: float
+    cuda_available: bool
+    cuda: Any
+
+
 def _anchor_event_plan(*, num_hidden_layers: int):
     """Hand-construct the frozen anchor `EventPlan` from already-known R2
     evidence -- NEVER `build_pass1_plan`'s outcome-blind sampler, since the
@@ -253,7 +283,7 @@ def build_frozen_branch_mutations(
     return mutations
 
 
-def run_geometry_worker(
+def capture_geometry_anchor(
     config: Any,
     manifest: Any,
     *,
@@ -262,11 +292,14 @@ def run_geometry_worker(
     _cuda: Any | None = None,
     _device: str = "cuda:0",
     _clock: Callable[[], float] | None = None,
-) -> GeometryWorkerResult:
-    """Real-model entry point. `_load_model`/`_load_tokenizer`/`_cuda`
-    injection follows exactly `kvcot.discovery.b2a_workers.run_rkv_worker`'s
-    convention (CPU tests inject fakes; production passes none of them and
-    requires real CUDA)."""
+) -> GeometryAnchorCapture:
+    """Phase A: everything up to and including the pre-outcome layer-set/
+    span-availability freeze and per-arm mutation construction -- NO
+    branch is evaluated and no swap gain exists anywhere in the returned
+    object. `_load_model`/`_load_tokenizer`/`_cuda` injection follows
+    exactly `kvcot.discovery.b2a_workers.run_rkv_worker`'s convention (CPU
+    tests inject fakes; production passes none of them and requires real
+    CUDA)."""
     import torch
 
     from kvcot.discovery.framework_seed import apply_framework_seed
@@ -382,34 +415,82 @@ def run_geometry_worker(
         layer_set=layer_set, span_availability=span_availability,
     )
 
-    branch_results = []
-    for arm, mutations in mutations_by_arm.items():
-        if mutations is None:
-            continue
-        branch_results.append(
-            build_geometry_branch_record(
-                arm=arm, pristine_snapshot=pristine_snapshot, mutations=mutations,
-                bridge_token_id=bridge_token_id, reference_token_ids=reference_token_ids,
-                branch_step_fn=branch_step_fn,
-            )
-        )
-
-    peak_allocated = int(cuda.max_memory_allocated()) if cuda_available else None
-    peak_reserved = int(cuda.max_memory_reserved()) if cuda_available else None
-    wall_seconds = clock() - started_at
-
-    return GeometryWorkerResult(
+    return GeometryAnchorCapture(
         example_id=manifest.unique_id,
         model_revision=config.model.revision,
         tokenizer_revision=config.model.tokenizer_revision,
-        rkv_revision=config.rkv.upstream_revision,
         natural_answer=trace.natural_answer,
         natural_answer_status=trace.natural_answer_status,
         natural_generated_token_count=len(trace.generated_token_ids),
         layer_set=layer_set,
         span_availability=span_availability,
+        pristine_snapshot=pristine_snapshot,
+        mutations_by_arm=mutations_by_arm,
+        bridge_token_id=bridge_token_id,
+        reference_token_ids=reference_token_ids,
+        branch_step_fn=branch_step_fn,
+        started_at=started_at,
+        cuda_available=cuda_available,
+        cuda=cuda,
+    )
+
+
+def evaluate_geometry_branches(capture: GeometryAnchorCapture, *, rkv_revision: str) -> GeometryWorkerResult:
+    """Phase B: evaluate every frozen arm's swap gain from the ALREADY-
+    captured, already-frozen anchor. Callers must persist
+    `capture.layer_set`/`capture.span_availability` to disk before calling
+    this function -- nothing here re-derives or changes either set."""
+    branch_results = []
+    for arm, mutations in capture.mutations_by_arm.items():
+        if mutations is None:
+            continue
+        branch_results.append(
+            build_geometry_branch_record(
+                arm=arm, pristine_snapshot=capture.pristine_snapshot, mutations=mutations,
+                bridge_token_id=capture.bridge_token_id, reference_token_ids=capture.reference_token_ids,
+                branch_step_fn=capture.branch_step_fn,
+            )
+        )
+
+    peak_allocated = int(capture.cuda.max_memory_allocated()) if capture.cuda_available else None
+    peak_reserved = int(capture.cuda.max_memory_reserved()) if capture.cuda_available else None
+    wall_seconds = time.perf_counter() - capture.started_at
+
+    return GeometryWorkerResult(
+        example_id=capture.example_id,
+        model_revision=capture.model_revision,
+        tokenizer_revision=capture.tokenizer_revision,
+        rkv_revision=rkv_revision,
+        natural_answer=capture.natural_answer,
+        natural_answer_status=capture.natural_answer_status,
+        natural_generated_token_count=capture.natural_generated_token_count,
+        layer_set=capture.layer_set,
+        span_availability=capture.span_availability,
         branch_results=tuple(branch_results),
         peak_cuda_allocated_bytes=peak_allocated,
         peak_cuda_reserved_bytes=peak_reserved,
         wall_seconds=wall_seconds,
     )
+
+
+def run_geometry_worker(
+    config: Any,
+    manifest: Any,
+    *,
+    _load_model: Callable[[], Any] | None = None,
+    _load_tokenizer: Callable[[], Any] | None = None,
+    _cuda: Any | None = None,
+    _device: str = "cuda:0",
+    _clock: Callable[[], float] | None = None,
+) -> GeometryWorkerResult:
+    """Convenience wrapper combining Phase A (`capture_geometry_anchor`)
+    and Phase B (`evaluate_geometry_branches`) in one call, for callers
+    that do not need to persist the pre-outcome freeze in between (e.g.
+    tests). `kvcot.discovery.geometry_pilot_execute.run_execute` calls the
+    two phases separately instead, persisting `layer_set.json`/
+    `span_availability.json` strictly between them."""
+    capture = capture_geometry_anchor(
+        config, manifest, _load_model=_load_model, _load_tokenizer=_load_tokenizer,
+        _cuda=_cuda, _device=_device, _clock=_clock,
+    )
+    return evaluate_geometry_branches(capture, rkv_revision=config.rkv.upstream_revision)
