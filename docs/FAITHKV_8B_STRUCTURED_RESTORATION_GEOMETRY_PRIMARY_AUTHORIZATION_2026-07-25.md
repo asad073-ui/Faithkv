@@ -14,7 +14,7 @@ dataset, revision, or gate frozen by CLAUDE.md or by
 | Authorization ID | `geometry-pilot-primary-2026-07-25` |
 | Repository | `asad073-ui/Faithkv` |
 | Branch | `research/8b-structured-restoration-geometry` |
-| Implementation (audited) commit SHA | `e37bf09b767c925a4ab7e9441279de12c0c1fecb` |
+| Implementation (audited) commit SHA | `8ade1db36fbbb0bfe0ef3d2fafce1ba77f7e203a` |
 | Protocol document | `docs/FAITHKV_8B_STRUCTURED_RESTORATION_GEOMETRY_PROTOCOL_2026-07-25.md` |
 | Protocol document SHA-256 | `b2f80bef26c07916e88e06a7e1dab6efc451b7c94458cdb51041730e92298df5` |
 | Operating-point JSON | `/workspace/faithkv-8b-geometry/authoritative-8b-operating-point.json` |
@@ -66,3 +66,16 @@ docs/FAITHKV_8B_STRUCTURED_RESTORATION_GEOMETRY_PRIMARY_AUTHORIZATION_2026-07-25
 
 Once FullKV/R-KV inference begins under this authorization, the attempt is
 scientifically consumed — no automatic or unauthorized second attempt.
+
+## Amendment (pre-consumption CLI fix, same day)
+
+The non-consuming dry-run/preflight check caught a `TypeError` in
+`cmd_run_8b_geometry_pilot`'s `--execute` branch
+(`git_commit(".")` — that function takes zero arguments; every other call
+site in `src/kvcot/cli.py` already calls it bare) before `run_execute` was
+ever entered — no claim was created, no CUDA was initialized, the
+authorization remained unconsumed. Commit `8ade1db` fixes the one-line
+call site, re-passes the full non-GPU CPU suite and exact-SHA CI, and does
+not touch any scientific threshold, event, candidate, layer, or arm
+definition. The "Implementation (audited) commit SHA" above is updated to
+this fix commit; nothing else in this authorization's binding changes.

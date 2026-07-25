@@ -1,10 +1,10 @@
 {
   "authorization_id": "geometry-pilot-primary-2026-07-25",
   "authorization_document_path": "docs/FAITHKV_8B_STRUCTURED_RESTORATION_GEOMETRY_PRIMARY_AUTHORIZATION_2026-07-25.md",
-  "authorization_document_sha256": "b5d4b89b0a492b7afa6f1561612ece4fedaf1b8ae8358747719f09f76ca7986e",
+  "authorization_document_sha256": "9bb19bddff936ed7862312da91eee200295ae6011158da98d76dcdafaca85915",
   "protocol_document_path": "docs/FAITHKV_8B_STRUCTURED_RESTORATION_GEOMETRY_PROTOCOL_2026-07-25.md",
   "protocol_document_sha256": "b2f80bef26c07916e88e06a7e1dab6efc451b7c94458cdb51041730e92298df5",
-  "implementation_commit_sha": "e37bf09b767c925a4ab7e9441279de12c0c1fecb",
+  "implementation_commit_sha": "8ade1db36fbbb0bfe0ef3d2fafce1ba77f7e203a",
   "operating_point_sha256": "89b2a866adee2780087457d90d569744f5e2d3a1eb8912b515af83fd4ae93ed0",
   "candidate_manifest_canonical_sha256": "efc9a113f518a57193b1cdd0607fee2d45e2c879c862b8e8190b2be9fead1349",
   "model_revision": "6a6f4aa4197940add57724a7707d069478df56b1",
