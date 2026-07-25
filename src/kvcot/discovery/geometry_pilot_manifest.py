@@ -127,53 +127,69 @@ def freeze_layer_set(pristine_snapshot: Any, candidate_layers: range | list[int]
     }
 
 
-def freeze_span_availability(pristine_snapshot: Any, prompt_length: int, total_length: int) -> dict[str, Any]:
+def freeze_span_availability(
+    pristine_snapshot: Any, capture_record: Any, prompt_length: int, total_length: int
+) -> dict[str, Any]:
     """Resolve and persist span availability for Arm S/SH -- the exact
-    positions `[t-1, t, t+1]` around the rank-zero candidate, using only
-    `ANCHOR_LAYER_INDEX`/`ANCHOR_KV_HEAD_INDEX`'s own provenance. No
-    alternative span is ever substituted; if any position is missing, out
-    of the eligible evicted region, or the middle position is not itself
-    the frozen rank-zero candidate, the span is recorded unavailable."""
+    positions `[t-1, t, t+1]` around the rank-zero candidate.
+
+    The MIDDLE position (`t`, the rank-zero candidate) was evicted BY the
+    anchor event itself -- it is only resolvable via the PRE-event
+    captured state (`capture_record`, the same source Arm C1 uses), never
+    via the POST-event `pristine_snapshot` (which no longer holds it at
+    this exact (layer, head) by construction of the eviction that just
+    happened there). The two NEIGHBOR positions (`t-1`, `t+1`) are
+    resolved via the POST-event `pristine_snapshot`: if a neighbor was not
+    independently evicted by this same event, its own current physical
+    slot IS its donor (restoring it there is an exact, honest no-op for
+    that one mutation) -- this pilot does not invent a third external
+    donor identity for a neighbor that WAS independently evicted; that
+    case is recorded as unavailable rather than substituting an
+    unevidenced donor.
+
+    No alternative span is ever substituted; if any position is missing,
+    out of the eligible evicted region, or a required source lacks the
+    position, the span is recorded unavailable."""
     from kvcot.discovery.geometry_pilot_restore import resolve_physical_position
 
-    positions = tuple(RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION + offset for offset in SPAN_OFFSETS)
-    if pristine_snapshot.provenance is None:
+    middle = RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION
+    positions = tuple(middle + offset for offset in SPAN_OFFSETS)
+    neighbor_positions = tuple(p for p in positions if p != middle)
+
+    def unavailable(reason: str) -> dict[str, Any]:
         return {
             "schema_version": "faithkv-8b-geometry-span-availability.v1",
             "span_absolute_positions": list(positions),
             "available": False,
-            "unavailable_reason": "no_provenance_on_snapshot",
+            "unavailable_reason": reason,
             "physical_slots": None,
         }
-    layer_provenance = pristine_snapshot.provenance.layers.get(ANCHOR_LAYER_INDEX)
-    if layer_provenance is None:
-        return {
-            "schema_version": "faithkv-8b-geometry-span-availability.v1",
-            "span_absolute_positions": list(positions),
-            "available": False,
-            "unavailable_reason": "anchor_layer_not_in_provenance",
-            "physical_slots": None,
-        }
-    slots: dict[int, int] = {}
+
     for position in positions:
         if not (prompt_length <= position < total_length):
-            return {
-                "schema_version": "faithkv-8b-geometry-span-availability.v1",
-                "span_absolute_positions": list(positions),
-                "available": False,
-                "unavailable_reason": f"position_{position}_outside_eligible_region",
-                "physical_slots": None,
-            }
+            return unavailable(f"position_{position}_outside_eligible_region")
+
+    if capture_record is None or capture_record.pre_event_absolute_position_map is None:
+        return unavailable("no_pre_event_capture_for_middle_position")
+    middle_slot = resolve_physical_position(
+        capture_record.pre_event_absolute_position_map, ANCHOR_KV_HEAD_INDEX, middle
+    )
+    if middle_slot is None:
+        return unavailable(f"position_{middle}_has_no_valid_pre_event_snapshot")
+
+    if pristine_snapshot.provenance is None:
+        return unavailable("no_provenance_on_snapshot")
+    layer_provenance = pristine_snapshot.provenance.layers.get(ANCHOR_LAYER_INDEX)
+    if layer_provenance is None:
+        return unavailable("anchor_layer_not_in_provenance")
+
+    slots: dict[int, int] = {middle: middle_slot}
+    for position in neighbor_positions:
         slot = resolve_physical_position(layer_provenance.positions, ANCHOR_KV_HEAD_INDEX, position)
         if slot is None:
-            return {
-                "schema_version": "faithkv-8b-geometry-span-availability.v1",
-                "span_absolute_positions": list(positions),
-                "available": False,
-                "unavailable_reason": f"position_{position}_has_no_valid_snapshot",
-                "physical_slots": None,
-            }
+            return unavailable(f"position_{position}_has_no_valid_post_event_snapshot")
         slots[position] = slot
+
     return {
         "schema_version": "faithkv-8b-geometry-span-availability.v1",
         "span_absolute_positions": list(positions),

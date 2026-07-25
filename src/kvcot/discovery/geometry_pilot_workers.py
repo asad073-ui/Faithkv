@@ -150,7 +150,32 @@ def _anchor_event_plan(*, num_hidden_layers: int):
     )
 
 
-def _resolve_candidate_vector(pristine_snapshot: Any, *, layer_index: int, kv_head_index: int, absolute_position: int):
+def _resolve_pre_event_vector(capture_record: Any, *, kv_head_index: int, absolute_position: int):
+    """Resolve a candidate's content from the PRE-EVENT captured state
+    (`UpdateKvCaptureRecord.pre_call_key_states`/`pre_call_value_states`,
+    keyed by `pre_event_absolute_position_map`) -- the only place a token
+    EVICTED by the anchor event itself still has its original content;
+    by the time the POST-event `pristine_snapshot` is taken, that content
+    has already been overwritten/evicted at this exact (layer, head).
+    Mirrors `kvcot.discovery.compact_target.build_compact_branch_target`'s
+    identical pre-event lookup, generalized to an arbitrary KV head rather
+    than assuming the one originally-selected head."""
+    position_map = capture_record.pre_event_absolute_position_map
+    if position_map is None:
+        return None, None
+    slot = resolve_physical_position(position_map, kv_head_index, absolute_position)
+    if slot is None:
+        return None, None
+    key = capture_record.pre_call_key_states[0, kv_head_index, slot, :].detach().clone().contiguous()
+    value = capture_record.pre_call_value_states[0, kv_head_index, slot, :].detach().clone().contiguous()
+    return key, value
+
+
+def _resolve_post_event_vector(pristine_snapshot: Any, *, layer_index: int, kv_head_index: int, absolute_position: int):
+    """Resolve content from the POST-event `pristine_snapshot` -- valid for
+    any (layer, head) the anchor event's own capture never touched (Arm
+    L/HL's non-anchor layers), where a token not independently evicted
+    there still holds its original content."""
     layer_provenance = None
     if pristine_snapshot.provenance is not None:
         layer_provenance = pristine_snapshot.provenance.layers.get(layer_index)
@@ -165,17 +190,35 @@ def _resolve_candidate_vector(pristine_snapshot: Any, *, layer_index: int, kv_he
 
 
 def _mutation_for(
-    pristine_snapshot: Any, *, layer_index: int, kv_head_index: int,
+    pristine_snapshot: Any, *, capture_record: Any, anchor_layer_index: int,
+    layer_index: int, kv_head_index: int,
     candidate_absolute_position: int, donor_absolute_position: int,
 ) -> KVMutationSpec:
-    candidate_key, candidate_value = _resolve_candidate_vector(
-        pristine_snapshot, layer_index=layer_index, kv_head_index=kv_head_index,
-        absolute_position=candidate_absolute_position,
-    )
+    # The candidate's ORIGINAL content: at the anchor layer, the anchor
+    # event may have just evicted it there (candidate_absolute_position ==
+    # donor_absolute_position for the no-op arm is the one exception,
+    # where "candidate" is actually the donor's own surviving content and
+    # the post-event snapshot is correct) -- resolve from the pre-event
+    # capture at the anchor layer, and from the post-event snapshot at
+    # every other layer (Arm L/HL's non-anchor layers, never captured
+    # pre-event by this pilot).
+    if layer_index == anchor_layer_index and candidate_absolute_position != donor_absolute_position:
+        candidate_key, candidate_value = _resolve_pre_event_vector(
+            capture_record, kv_head_index=kv_head_index, absolute_position=candidate_absolute_position,
+        )
+    else:
+        candidate_key, candidate_value = _resolve_post_event_vector(
+            pristine_snapshot, layer_index=layer_index, kv_head_index=kv_head_index,
+            absolute_position=candidate_absolute_position,
+        )
     if candidate_key is None:
         raise GeometryWorkerError(
             f"candidate {candidate_absolute_position} not resolvable at layer {layer_index}, head {kv_head_index}"
         )
+    # The donor's WRITE-TARGET slot is always the current (post-event)
+    # physical layout -- a donor is a survivor by definition, never
+    # evicted by the anchor event, so its post-event slot is where the
+    # mutation must actually write.
     donor_layer_provenance = pristine_snapshot.provenance.layers.get(layer_index)
     donor_slot = resolve_physical_position(donor_layer_provenance.positions, kv_head_index, donor_absolute_position)
     if donor_slot is None:
@@ -195,56 +238,45 @@ def _mutation_for(
 
 def build_frozen_branch_mutations(
     pristine_snapshot: Any,
+    capture_record: Any,
     *,
     num_key_value_heads: int,
     layer_set: dict[str, Any],
     span_availability: dict[str, Any],
 ) -> dict[str, list[KVMutationSpec] | None]:
     """Build the concrete mutation list for every one of the 8 frozen arms
-    from ONE already-captured pristine snapshot. Returns `None` for an arm
-    whose structural prerequisite (§5) was not satisfied -- never a
-    substitute geometry."""
+    from ONE already-captured pristine snapshot plus the anchor event's
+    pre-event capture record. Returns `None` for an arm whose structural
+    prerequisite (§5) was not satisfied -- never a substitute geometry."""
     all_heads = resolve_all_kv_head_indices(num_key_value_heads)
+
+    def mutation(layer, head, candidate, donor):
+        return _mutation_for(
+            pristine_snapshot, capture_record=capture_record, anchor_layer_index=ANCHOR_LAYER_INDEX,
+            layer_index=layer, kv_head_index=head,
+            candidate_absolute_position=candidate, donor_absolute_position=donor,
+        )
+
     mutations: dict[str, list[KVMutationSpec] | None] = {}
 
     mutations[ARM_C1] = [
-        _mutation_for(
-            pristine_snapshot, layer_index=ANCHOR_LAYER_INDEX, kv_head_index=ANCHOR_KV_HEAD_INDEX,
-            candidate_absolute_position=RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION,
-            donor_absolute_position=PRIMARY_DONOR_ABSOLUTE_POSITION,
-        )
+        mutation(ANCHOR_LAYER_INDEX, ANCHOR_KV_HEAD_INDEX, RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION, PRIMARY_DONOR_ABSOLUTE_POSITION)
     ]
     mutations[ARM_C2] = [
-        _mutation_for(
-            pristine_snapshot, layer_index=ANCHOR_LAYER_INDEX, kv_head_index=ANCHOR_KV_HEAD_INDEX,
-            candidate_absolute_position=RANK_ONE_CANDIDATE_ABSOLUTE_POSITION,
-            donor_absolute_position=PRIMARY_DONOR_ABSOLUTE_POSITION,
-        )
+        mutation(ANCHOR_LAYER_INDEX, ANCHOR_KV_HEAD_INDEX, RANK_ONE_CANDIDATE_ABSOLUTE_POSITION, PRIMARY_DONOR_ABSOLUTE_POSITION)
     ]
     mutations[ARM_H] = [
-        _mutation_for(
-            pristine_snapshot, layer_index=ANCHOR_LAYER_INDEX, kv_head_index=head,
-            candidate_absolute_position=RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION,
-            donor_absolute_position=PRIMARY_DONOR_ABSOLUTE_POSITION,
-        )
+        mutation(ANCHOR_LAYER_INDEX, head, RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION, PRIMARY_DONOR_ABSOLUTE_POSITION)
         for head in all_heads
     ]
 
     if layer_set["available"]:
         mutations[ARM_L] = [
-            _mutation_for(
-                pristine_snapshot, layer_index=layer, kv_head_index=ANCHOR_KV_HEAD_INDEX,
-                candidate_absolute_position=RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION,
-                donor_absolute_position=PRIMARY_DONOR_ABSOLUTE_POSITION,
-            )
+            mutation(layer, ANCHOR_KV_HEAD_INDEX, RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION, PRIMARY_DONOR_ABSOLUTE_POSITION)
             for layer in layer_set["valid_layer_indices"]
         ]
         mutations[ARM_HL] = [
-            _mutation_for(
-                pristine_snapshot, layer_index=layer, kv_head_index=head,
-                candidate_absolute_position=RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION,
-                donor_absolute_position=PRIMARY_DONOR_ABSOLUTE_POSITION,
-            )
+            mutation(layer, head, RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION, PRIMARY_DONOR_ABSOLUTE_POSITION)
             for layer in layer_set["valid_layer_indices"]
             for head in all_heads
         ]
@@ -253,20 +285,22 @@ def build_frozen_branch_mutations(
         mutations[ARM_HL] = None
 
     if span_availability["available"]:
-        span_positions = span_availability["span_absolute_positions"]
-        mutations[ARM_S] = [
-            _mutation_for(
-                pristine_snapshot, layer_index=ANCHOR_LAYER_INDEX, kv_head_index=ANCHOR_KV_HEAD_INDEX,
-                candidate_absolute_position=position, donor_absolute_position=position,
-            )
-            for position in span_positions
+        middle = RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION
+        neighbors = [p for p in span_availability["span_absolute_positions"] if p != middle]
+        # Middle (genuinely evicted by the anchor event): candidate ==
+        # middle, donor == the known primary donor. Neighbors (resolved via
+        # POST-event snapshot in freeze_span_availability, i.e. still
+        # present): candidate == donor == the neighbor's own position --
+        # an honest self-restore, exact no-op for any neighbor the anchor
+        # event did not also evict, never an invented third donor identity.
+        mutations[ARM_S] = [mutation(ANCHOR_LAYER_INDEX, ANCHOR_KV_HEAD_INDEX, middle, PRIMARY_DONOR_ABSOLUTE_POSITION)] + [
+            mutation(ANCHOR_LAYER_INDEX, ANCHOR_KV_HEAD_INDEX, position, position) for position in neighbors
         ]
         mutations[ARM_SH] = [
-            _mutation_for(
-                pristine_snapshot, layer_index=ANCHOR_LAYER_INDEX, kv_head_index=head,
-                candidate_absolute_position=position, donor_absolute_position=position,
-            )
-            for position in span_positions
+            mutation(ANCHOR_LAYER_INDEX, head, middle, PRIMARY_DONOR_ABSOLUTE_POSITION) for head in all_heads
+        ] + [
+            mutation(ANCHOR_LAYER_INDEX, head, position, position)
+            for position in neighbors
             for head in all_heads
         ]
     else:
@@ -274,11 +308,7 @@ def build_frozen_branch_mutations(
         mutations[ARM_SH] = None
 
     mutations[ARM_NOOP] = [
-        _mutation_for(
-            pristine_snapshot, layer_index=ANCHOR_LAYER_INDEX, kv_head_index=ANCHOR_KV_HEAD_INDEX,
-            candidate_absolute_position=PRIMARY_DONOR_ABSOLUTE_POSITION,
-            donor_absolute_position=PRIMARY_DONOR_ABSOLUTE_POSITION,
-        )
+        mutation(ANCHOR_LAYER_INDEX, ANCHOR_KV_HEAD_INDEX, PRIMARY_DONOR_ABSOLUTE_POSITION, PRIMARY_DONOR_ABSOLUTE_POSITION)
     ]
     return mutations
 
@@ -411,10 +441,12 @@ def capture_geometry_anchor(
 
     target_capture = pass2_result.target_captures[0]
     pristine_snapshot = target_capture.pristine_snapshot
+    capture_record = target_capture.capture_record
 
     layer_set = freeze_layer_set(pristine_snapshot, candidate_layers=range(num_hidden_layers))
     span_availability = freeze_span_availability(
-        pristine_snapshot, prompt_length=trace.prompt_length, total_length=len(trace.full_token_ids),
+        pristine_snapshot, capture_record,
+        prompt_length=trace.prompt_length, total_length=len(trace.full_token_ids),
     )
 
     bridge_pos = ANCHOR_BRIDGE_TOKEN_ABSOLUTE_POSITION
@@ -425,7 +457,7 @@ def capture_geometry_anchor(
         raise GeometryWorkerError("insufficient future tokens for the scored horizon")
 
     mutations_by_arm = build_frozen_branch_mutations(
-        pristine_snapshot, num_key_value_heads=num_key_value_heads,
+        pristine_snapshot, capture_record, num_key_value_heads=num_key_value_heads,
         layer_set=layer_set, span_availability=span_availability,
     )
 

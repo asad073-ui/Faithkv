@@ -95,6 +95,26 @@ def test_resolve_all_kv_head_indices_rejects_query_head_count():
 
 # --- layer-set / span-availability freezing ---
 
+def _fake_capture_record(num_kv_heads=8, pre_seq_len=10):
+    from kvcot.discovery.capture import UpdateKvCaptureRecord
+
+    position_map = torch.arange(pre_seq_len, dtype=torch.long).unsqueeze(0).expand(num_kv_heads, -1).clone()
+    key = torch.zeros(1, num_kv_heads, pre_seq_len, 2)
+    value = torch.zeros(1, num_kv_heads, pre_seq_len, 2)
+    return UpdateKvCaptureRecord(
+        had_compaction=True,
+        pre_call_key_states=key, pre_call_value_states=value,
+        pre_call_key_shape=tuple(key.shape), pre_call_value_shape=tuple(value.shape),
+        pre_call_dtype="float32", pre_call_device="cpu",
+        recomputed_final_score=None, recomputed_attention_component=None,
+        recomputed_similarity_component=None, recomputed_topk_indices=None,
+        window_size=1, returned_key_states=key, returned_value_states=value,
+        gather_parity_passed=True, pre_event_absolute_position_map=position_map,
+        recomputed_kept_absolute_positions=None, observed_kept_absolute_positions=None,
+        observed_kept_indices_parity_passed=True, parity_check_passed=True, parity_failure_reason=None,
+    )
+
+
 def _snapshot_with_layers(num_layers=4, num_kv_heads=8, seq_len=10):
     keys = [torch.zeros(1, num_kv_heads, seq_len, 2) for _ in range(num_layers)]
     values = [torch.zeros(1, num_kv_heads, seq_len, 2) for _ in range(num_layers)]
@@ -138,7 +158,7 @@ def test_freeze_span_availability_all_present(monkeypatch):
     monkeypatch.setattr(mod, "ANCHOR_LAYER_INDEX", 1)
     monkeypatch.setattr(mod, "RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION", 4)
     snapshot = _snapshot_with_layers()
-    result = freeze_span_availability(snapshot, prompt_length=0, total_length=10)
+    result = freeze_span_availability(snapshot, _fake_capture_record(), prompt_length=0, total_length=10)
     assert result["available"] is True
     assert len(result["physical_slots"]) == 3
 
@@ -150,9 +170,9 @@ def test_freeze_span_availability_missing_neighbor(monkeypatch):
     snapshot = _snapshot_with_layers()
     # Force one span neighbor to be evicted at the anchor (layer, head).
     snapshot.provenance.layers[1].positions[ANCHOR_KV_HEAD_INDEX, 5] = 12345
-    result = freeze_span_availability(snapshot, prompt_length=0, total_length=10)
+    result = freeze_span_availability(snapshot, _fake_capture_record(), prompt_length=0, total_length=10)
     assert result["available"] is False
-    assert "has_no_valid_snapshot" in result["unavailable_reason"]
+    assert "has_no_valid_post_event_snapshot" in result["unavailable_reason"]
 
 
 def test_freeze_span_availability_outside_eligible_region(monkeypatch):
@@ -160,7 +180,7 @@ def test_freeze_span_availability_outside_eligible_region(monkeypatch):
     monkeypatch.setattr(mod, "ANCHOR_LAYER_INDEX", 1)
     monkeypatch.setattr(mod, "RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION", 0)
     snapshot = _snapshot_with_layers(seq_len=10)
-    result = freeze_span_availability(snapshot, prompt_length=0, total_length=10)
+    result = freeze_span_availability(snapshot, _fake_capture_record(), prompt_length=0, total_length=10)
     assert result["available"] is False
     assert "outside_eligible_region" in result["unavailable_reason"]
 
@@ -174,8 +194,8 @@ def test_freeze_span_availability_distinct_from_zero_effect_case(monkeypatch):
     # conflate the two; this asserts the unavailable-reason field exists
     # only in the unavailable case.
     snapshot = _snapshot_with_layers()
-    available = freeze_span_availability(snapshot, prompt_length=0, total_length=10)
+    available = freeze_span_availability(snapshot, _fake_capture_record(), prompt_length=0, total_length=10)
     assert available["unavailable_reason"] is None
     snapshot.provenance = None
-    unavailable = freeze_span_availability(snapshot, prompt_length=0, total_length=10)
+    unavailable = freeze_span_availability(snapshot, _fake_capture_record(), prompt_length=0, total_length=10)
     assert unavailable["unavailable_reason"] is not None
