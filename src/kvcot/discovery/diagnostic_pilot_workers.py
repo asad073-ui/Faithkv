@@ -259,7 +259,15 @@ def _run_event_score_replay(
                     return False, "diagnostic_score_replay_survivor_mismatch", []
                 pool = freeze_candidate_pool(_candidate_scores_for_record(plan, record))
                 captured_event_ids.add(plan.compaction_event_id)
-                if len(pool.candidates) >= 2:
+                rank_zero_available_all_heads = bool(pool.candidates) and all(
+                    _find_position(
+                        record.pre_event_absolute_position_map[kv_head],
+                        pool.candidates[0].absolute_token_position,
+                    )
+                    is not None
+                    for kv_head in range(EXPECTED_KV_HEADS)
+                )
+                if len(pool.candidates) >= 2 and rank_zero_available_all_heads:
                     scored.append(DiagnosticScoredEvent(plan, pool))
                 del record
 
@@ -694,7 +702,7 @@ def run_rkv_diagnostic_worker(config: Any, manifest: Any, fullkv_result: dict[st
         "rkv_replay_mechanically_valid": pass2_valid,
         "correctness_status_matched": fullkv_status == rkv_status,
         "meaningful_compression": meaningful_compression,
-        "eligible_event_exists": bool(event_plans),
+        "eligible_event_exists": bool(scored_events),
         "selected_event_has_two_candidates": bool(
             selected_event and len(selected_event["candidate_pool"]) >= 2
         ),
@@ -705,6 +713,7 @@ def run_rkv_diagnostic_worker(config: Any, manifest: Any, fullkv_result: dict[st
         "pass2_invalid_reason": pass2_reason,
         "observed_compaction_event_count": len(trace.compaction_events),
         "eligible_event_plan_count": len(event_plans),
+        "eligible_scored_event_count": len(scored_events),
     }
     qualifies = all(
         qualification[field]
@@ -830,6 +839,7 @@ def run_rkv_diagnostic_worker(config: Any, manifest: Any, fullkv_result: dict[st
                 "deployable_event_score": row.candidate_pool.candidates[0].deployable_score,
                 "candidate_pool": [candidate.__dict__ for candidate in row.candidate_pool.candidates],
                 "captured_before_intervention": True,
+                "rank_zero_candidate_available_in_all_kv_heads": True,
             }
             for row in scored_events
         ],

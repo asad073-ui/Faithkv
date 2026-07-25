@@ -13,7 +13,13 @@ The implementation adds an isolated `diagnostic_pilot_*` namespace with:
 - a diagnostic-only same-layer KV restore primitive accepting widths one
   and two and rejecting width four;
 - separate FullKV and diagnostic R-KV subprocess roles;
-- an atomic create-if-absent one-use claim;
+- an atomic create-if-absent one-use claim whose complete, synced bytes are
+  exposed through a same-directory hard link;
+- an exception-preservation boundary beginning immediately after that claim,
+  with attempt-local completion/final records and a claim-directory fallback
+  if attempt creation itself fails;
+- claim-call failure preservation when create-if-absent has already consumed
+  the path but a subsequent claim write or sync operation raises;
 - non-consuming dry-run preflight;
 - immutable attempt artifacts, partial-failure preservation, independent
   primitive-to-summary reconstruction, and final reference hashes;
@@ -67,3 +73,11 @@ All production Torch, Transformers, and R-KV imports are deferred to worker
 bodies. Importing the CLI, coordinator, dry-run, contracts, authorization,
 or worker module does not import Torch or Transformers and cannot initialize
 CUDA.
+
+The final preflight also hashes the checked-out protocol document, diagnostic
+config, and frozen candidate manifest and compares those bytes with the
+canonical runtime binding. Attempt reconstruction validates model/R-KV
+identity, the 12-query-head/2-KV-head architecture, candidate ranks and
+control identity, per-head mutation counts and donor slots, and primitive
+answer-token log probabilities before accepting any derived projection or
+summary.

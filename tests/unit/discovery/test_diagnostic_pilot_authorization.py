@@ -6,6 +6,7 @@ import sys
 
 import pytest
 
+from kvcot.discovery.attempt_artifacts import sha256_file
 from kvcot.discovery.diagnostic_pilot_authorization import (
     AUTHORIZATION_JSON_BEGIN,
     AUTHORIZATION_JSON_END,
@@ -28,6 +29,8 @@ from kvcot.discovery.diagnostic_pilot_contract import (
 
 def authorization(tmp_path):
     claim = tmp_path / "claim.json"
+    audit = tmp_path / "implementation-audit.md"
+    audit.write_text("PASS synthetic audit\n", encoding="utf-8")
     payload = attach_canonical_hash(
         {
             "authorization_id": "synthetic-one-use",
@@ -44,7 +47,9 @@ def authorization(tmp_path):
             "output_root": str(tmp_path / "execution"),
             "protocol_document_sha256": "b" * 64,
             "runtime_config_canonical_sha256": "c" * 64,
-            "implementation_audit_sha256": "d" * 64,
+            "implementation_audit_path": str(audit),
+            "implementation_audit_sha256": sha256_file(audit),
+            "implementation_audit_verdict": "PASS",
             "candidate_manifest_canonical_sha256": CANDIDATE_MANIFEST_CANONICAL_SHA256,
             "maximum_qualification_candidates": 8,
             "maximum_selected_examples": 3,
@@ -75,6 +80,15 @@ def test_claim_consumption_is_atomic_and_permanently_prohibits_retry(tmp_path):
     assert verify_claim(claim_path)["retry_allowed"] is False
     with pytest.raises(DiagnosticAuthorizationConsumed):
         claim_authorization_once(auth, attempt_id="again", attempt_directory="/tmp/again")
+
+
+def test_authorization_binds_the_actual_implementation_audit_bytes(tmp_path):
+    auth, _claim_path = authorization(tmp_path)
+    Path(auth.payload["implementation_audit_path"]).write_text(
+        "FAIL mutated audit\n", encoding="utf-8"
+    )
+    with pytest.raises(Exception, match="audit file hash mismatch"):
+        parse_authorization_document(auth.document_path)
 
 
 def test_worker_and_execute_module_imports_do_not_import_torch_or_transformers():

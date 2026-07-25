@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -14,17 +15,22 @@ from typing import Any
 
 from kvcot.discovery.attempt_artifacts import atomic_write_json, atomic_write_text, sha256_file
 from kvcot.discovery.diagnostic_pilot_authorization import (
+    DiagnosticAuthorizationConsumed,
     claim_authorization_once,
     parse_authorization_document,
 )
 from kvcot.discovery.diagnostic_pilot_contract import (
     BRANCH,
+    CANDIDATE_MANIFEST_BYTE_SHA256,
     CANDIDATE_MANIFEST_CANONICAL_SHA256,
+    CANDIDATE_MANIFEST_PATH,
     CONFIG_PATH,
     EXACT_EXECUTION_COMMAND,
+    MAXIMUM_CANDIDATE_POOL_SIZE,
     MAXIMUM_QUALIFICATION_CANDIDATES,
     MAXIMUM_SELECTED_EXAMPLES,
     MODEL_REVISION,
+    PAIR_SCHEMA_VERSION,
     PROTOCOL_DOCUMENT_PATH,
     RKV_REVISION,
     RUNTIME_LIMIT_SECONDS,
@@ -84,6 +90,18 @@ def _preflight(repository_root: Path, authorization: Any) -> dict[str, Any]:
         raise DiagnosticExecutionRefused("runtime-config canonical hash mismatch")
     if runtime["protocol_document_sha256"] != payload["protocol_document_sha256"]:
         raise DiagnosticExecutionRefused("protocol document hash mismatch")
+    if sha256_file(repository_root / PROTOCOL_DOCUMENT_PATH) != runtime[
+        "protocol_document_sha256"
+    ]:
+        raise DiagnosticExecutionRefused("checked-out protocol document differs from runtime binding")
+    if sha256_file(repository_root / CONFIG_PATH) != runtime["config_byte_sha256"]:
+        raise DiagnosticExecutionRefused("checked-out diagnostic config differs from runtime binding")
+    manifest_path = repository_root / CANDIDATE_MANIFEST_PATH
+    if sha256_file(manifest_path) != CANDIDATE_MANIFEST_BYTE_SHA256:
+        raise DiagnosticExecutionRefused("checked-out candidate manifest byte hash mismatch")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("canonical_sha256") != CANDIDATE_MANIFEST_CANONICAL_SHA256:
+        raise DiagnosticExecutionRefused("checked-out candidate manifest canonical hash mismatch")
     if payload["candidate_manifest_canonical_sha256"] != CANDIDATE_MANIFEST_CANONICAL_SHA256:
         raise DiagnosticExecutionRefused("candidate-manifest canonical hash mismatch")
     if payload["model_revision"] != MODEL_REVISION or payload["tokenizer_revision"] != TOKENIZER_REVISION:
@@ -192,14 +210,103 @@ def _attempt_references(attempt: Path) -> dict[str, Any]:
 
 
 def _pair_population_valid(result: dict[str, Any]) -> bool:
+    architecture = result.get("architecture") or {}
+    if (
+        result.get("role") != "diagnostic_rkv"
+        or result.get("model_revision") != MODEL_REVISION
+        or result.get("tokenizer_revision") != TOKENIZER_REVISION
+        or result.get("rkv_revision") != RKV_REVISION
+        or architecture.get("num_attention_heads") != 12
+        or architecture.get("num_key_value_heads") != 2
+        or result.get("free_running_answer_flip_available") is not False
+    ):
+        return False
     selected_event = result.get("selected_event") or {}
     pool = selected_event.get("candidate_pool") or []
+    if not 2 <= len(pool) <= MAXIMUM_CANDIDATE_POOL_SIZE:
+        return False
+    if any(
+        type(row.get("absolute_token_position")) is not int
+        or type(row.get("deployable_score")) not in (float, int)
+        or not math.isfinite(float(row["deployable_score"]))
+        for row in pool
+    ):
+        return False
+    if len({row["absolute_token_position"] for row in pool}) != len(pool):
+        return False
+    if pool != sorted(
+        pool,
+        key=lambda row: (-float(row["deployable_score"]), row["absolute_token_position"]),
+    ):
+        return False
+    evidence = result.get("eligible_event_score_evidence") or []
+    if not evidence:
+        return False
+    for event in evidence:
+        event_pool = event.get("candidate_pool") or []
+        if not 2 <= len(event_pool) <= MAXIMUM_CANDIDATE_POOL_SIZE:
+            return False
+        if any(
+            type(row.get("absolute_token_position")) is not int
+            or type(row.get("deployable_score")) not in (float, int)
+            or not math.isfinite(float(row["deployable_score"]))
+            for row in event_pool
+        ):
+            return False
+        if len({row["absolute_token_position"] for row in event_pool}) != len(event_pool):
+            return False
+        if event_pool != sorted(
+            event_pool,
+            key=lambda row: (-float(row["deployable_score"]), row["absolute_token_position"]),
+        ):
+            return False
+        if event.get("deployable_event_score") != event_pool[0].get("deployable_score"):
+            return False
+        if event.get("captured_before_intervention") is not True:
+            return False
+        if event.get("rank_zero_candidate_available_in_all_kv_heads") is not True:
+            return False
+    expected_event = min(
+        evidence,
+        key=lambda row: (
+            -float(row["deployable_event_score"]),
+            row["event_index"],
+            row["layer_index"],
+            row["selected_kv_head"],
+        ),
+    )
+    for key in (
+        "event_index",
+        "absolute_event_position",
+        "layer_index",
+        "selected_kv_head",
+        "deployable_event_score",
+        "candidate_pool",
+    ):
+        if selected_event.get(key) != expected_event.get(key):
+            return False
+    if selected_event.get("candidate_pool_frozen_before_intervention") is not True:
+        return False
+    if selected_event.get("candidate_pool_diagnostic_only") is not True:
+        return False
+    if result.get("score_replay_retained_full_snapshots") != 0:
+        return False
+    if result.get("selected_snapshot_count") != 1:
+        return False
     pool_positions = [row.get("absolute_token_position") for row in pool]
     pairs = result.get("pair_records") or []
+    if any(pair.get("arm") not in {"candidate_upper_bound", "restore_width", "no_op"} for pair in pairs):
+        return False
     arm_a = [pair for pair in pairs if pair.get("arm") == "candidate_upper_bound"]
     arm_b = [pair for pair in pairs if pair.get("arm") == "restore_width"]
     noop = [pair for pair in pairs if pair.get("arm") == "no_op"]
     if [pair.get("candidate_absolute_position") for pair in arm_a] != pool_positions:
+        return False
+    if [pair.get("candidate_pool_rank") for pair in arm_a] != list(range(len(pool_positions))):
+        return False
+    if [pair.get("is_control_candidate") for pair in arm_a] != [
+        index == 0 for index in range(len(pool_positions))
+    ]:
         return False
     if len(arm_b) != 1 or len(noop) != 1 or not pool_positions:
         return False
@@ -209,15 +316,64 @@ def _pair_population_valid(result: dict[str, Any]) -> bool:
         return False
     if any(
         pair.get("restore_width") != 1
+        or pair.get("kv_head_indices") != [selected_event.get("selected_kv_head")]
         or pair.get("diagnostic_only") is not True
         or pair.get("deployable_performance") is not False
         for pair in arm_a
     ):
         return False
+    if arm_b[0].get("diagnostic_only") is not False or arm_b[0].get(
+        "deployable_performance"
+    ) is not False:
+        return False
     donor = selected_event.get("donor_absolute_position")
     if noop[0].get("candidate_absolute_position") != donor or noop[0].get("donor_absolute_position") != donor:
         return False
+    if (
+        noop[0].get("restore_width") != 1
+        or noop[0].get("kv_head_indices") != [selected_event.get("selected_kv_head")]
+        or noop[0].get("diagnostic_only") is not False
+        or noop[0].get("deployable_performance") is not False
+    ):
+        return False
     for pair in pairs:
+        if pair.get("artifact_schema_version") != PAIR_SCHEMA_VERSION:
+            return False
+        if pair.get("compaction_event_id") != selected_event.get("event_index"):
+            return False
+        if pair.get("layer_index") != selected_event.get("layer_index"):
+            return False
+        if pair.get("selected_kv_head") != selected_event.get("selected_kv_head"):
+            return False
+        if pair.get("donor_absolute_position") != donor:
+            return False
+        mutation = pair.get("mutation") or {}
+        if mutation.get("layer_index") != pair.get("layer_index"):
+            return False
+        if mutation.get("kv_head_indices") != pair.get("kv_head_indices"):
+            return False
+        if mutation.get("cache_shape_unchanged") is not True:
+            return False
+        if mutation.get("absolute_position_unchanged") is not True:
+            return False
+        if mutation.get("provenance_valid") is not True:
+            return False
+        donor_slots = pair.get("donor_post_storage_positions_by_head") or {}
+        expected_slots = [
+            [head, donor_slots.get(str(head), donor_slots.get(head))]
+            for head in pair.get("kv_head_indices", [])
+        ]
+        if any(type(slot) is not int or slot < 0 for _head, slot in expected_slots):
+            return False
+        if mutation.get("token_positions_by_head") != expected_slots:
+            return False
+        expected_changes = 0 if pair.get("arm") == "no_op" else pair.get("restore_width")
+        if mutation.get("key_slots_changed") != expected_changes:
+            return False
+        if mutation.get("value_slots_changed") != expected_changes:
+            return False
+        if mutation.get("is_noop") is not (pair.get("arm") == "no_op"):
+            return False
         baseline_ids = pair.get("baseline_scored_token_ids")
         intervention_ids = pair.get("intervention_scored_token_ids")
         baseline_nll = pair.get("baseline_per_token_nll")
@@ -240,17 +396,28 @@ def _pair_population_valid(result: dict[str, Any]) -> bool:
             return False
         if pair.get("swap_gain") != baseline_mean - intervention_mean:
             return False
-        before = {
-            row["absolute_position"]: row["margin"]
-            for row in pair.get("baseline_answer_token_margins", [])
+        baseline_margin_rows = pair.get("baseline_answer_token_margins", [])
+        intervention_margin_rows = pair.get("intervention_answer_token_margins", [])
+        if not _answer_margin_evidence_valid(baseline_margin_rows):
+            return False
+        if not _answer_margin_evidence_valid(intervention_margin_rows):
+            return False
+        baseline_correct = {
+            row["absolute_position"]: row
+            for row in baseline_margin_rows
+            if row["is_correct_answer_token"] is True
         }
-        after = {
-            row["absolute_position"]: row["margin"]
-            for row in pair.get("intervention_answer_token_margins", [])
+        intervention_correct = {
+            row["absolute_position"]: row
+            for row in intervention_margin_rows
+            if row["is_correct_answer_token"] is True
         }
         reconstructed_margin_change = any(
-            material_margin_change(before.get(position), after.get(position))
-            for position in set(before) | set(after)
+            material_margin_change(
+                baseline_correct.get(position, {}).get("margin"),
+                intervention_correct.get(position, {}).get("margin"),
+            )
+            for position in set(baseline_correct) | set(intervention_correct)
         )
         if pair.get("answer_margin_sign_change") is not reconstructed_margin_change:
             return False
@@ -273,6 +440,46 @@ def _pair_population_valid(result: dict[str, Any]) -> bool:
         and no_op.get("baseline_final_state_sha256") == no_op.get("intervention_final_state_sha256")
         and (no_op.get("mutation") or {}).get("is_noop") is True
     )
+
+
+def _answer_margin_evidence_valid(rows: Any) -> bool:
+    if not isinstance(rows, list):
+        return False
+    positions: set[int] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        position = row.get("absolute_position")
+        reference_id = row.get("reference_token_id")
+        alternative_id = row.get("strongest_alternative_token_id")
+        reference_logp = row.get("reference_log_probability")
+        alternative_logp = row.get("strongest_alternative_log_probability")
+        margin = row.get("margin")
+        if (
+            type(position) is not int
+            or position in positions
+            or type(reference_id) is not int
+            or type(alternative_id) is not int
+            or reference_id == alternative_id
+            or type(reference_logp) not in (float, int)
+            or type(alternative_logp) not in (float, int)
+            or type(margin) not in (float, int)
+            or not all(
+                math.isfinite(float(value))
+                for value in (reference_logp, alternative_logp, margin)
+            )
+            or float(margin) != float(reference_logp) - float(alternative_logp)
+            or type(row.get("is_correct_answer_token")) is not bool
+        ):
+            return False
+        correct_logp = row.get("correct_answer_log_probability")
+        if row["is_correct_answer_token"] is True:
+            if correct_logp != reference_logp:
+                return False
+        elif correct_logp is not None:
+            return False
+        positions.add(position)
+    return True
 
 
 def _summarize(qualification_rows: list[dict[str, Any]], rkv_results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -345,6 +552,117 @@ def _summarize(qualification_rows: list[dict[str, Any]], rkv_results: list[dict[
     )
 
 
+def _preserve_consumed_failure(
+    *, attempt: Path, attempt_id: str, claim_path: Path, started: float, exc: BaseException
+) -> None:
+    """Best-effort immutable failure evidence after the claim exists.
+
+    The attempt directory is preferred.  If setup failed before it could be
+    created or made writable, the claim directory is the last known writable
+    location because the atomic claim was just created there successfully.
+    """
+    try:
+        claim_canonical_sha256 = json.loads(claim_path.read_text(encoding="utf-8")).get(
+            "canonical_sha256"
+        )
+    except BaseException:
+        claim_canonical_sha256 = None
+    failure = {
+        "completed": False,
+        "failure_type": type(exc).__name__,
+        "failure_message": str(exc),
+        "claim_path": str(claim_path),
+        "attempt_id": attempt_id,
+        "intended_attempt_directory": str(attempt),
+        "authorization_consumed": True,
+        "retry_allowed": False,
+        "runtime_seconds": time.perf_counter() - started,
+    }
+    preservation_errors: list[str] = []
+    if attempt.is_dir():
+        try:
+            if not (attempt / "completion.json").exists():
+                atomic_write_json(attempt / "completion.json", failure)
+            if not (attempt / "final.json").exists():
+                atomic_write_json(
+                    attempt / "final.json",
+                    {
+                        "attempt_id": attempt_id,
+                        "claim_path": str(claim_path),
+                        "claim_canonical_sha256": claim_canonical_sha256,
+                        "classification": "void",
+                        "failure": failure,
+                        "references": _attempt_references(attempt),
+                    },
+                )
+            return
+        except BaseException as preserve_exc:
+            preservation_errors.append(
+                f"attempt:{type(preserve_exc).__name__}:{preserve_exc}"
+            )
+    fallback = claim_path.with_name(f"{claim_path.name}.failure.json")
+    fallback_payload = dict(failure, preservation_errors=preservation_errors)
+    try:
+        atomic_write_json(fallback, fallback_payload)
+    except BaseException:
+        # The immutable claim still proves consumption. There is no further
+        # known-safe writable boundary; never mask the original exception.
+        pass
+
+
+def _derived_projection_payloads(selected_results: list[dict[str, Any]]) -> dict[str, Any]:
+    selected_examples = [
+        {
+            "candidate_ordinal": row["candidate_ordinal"],
+            "unique_id": row["unique_id"],
+            "selected_event": row["selected_event"],
+        }
+        for row in selected_results
+    ]
+    candidate_pools = [row["selected_event"] for row in selected_results]
+    pair_records = [pair for row in selected_results for pair in row["pair_records"]]
+    behavioural_readouts = [
+        {
+            "candidate_ordinal": row["candidate_ordinal"],
+            "unique_id": row["unique_id"],
+            "fixed_trace_extracted_answer": row["fixed_trace_extracted_answer"],
+            "fixed_trace_correctness_status": row["fixed_trace_correctness_status"],
+            "free_running_answer_flip_available": False,
+            "pairs": [
+                {
+                    "arm": pair["arm"],
+                    "candidate_absolute_position": pair["candidate_absolute_position"],
+                    "baseline_answer_token_margins": pair["baseline_answer_token_margins"],
+                    "intervention_answer_token_margins": pair[
+                        "intervention_answer_token_margins"
+                    ],
+                    "answer_margin_sign_change": pair["answer_margin_sign_change"],
+                    "baseline_fixed_trace_extracted_answer": pair[
+                        "baseline_fixed_trace_extracted_answer"
+                    ],
+                    "intervention_fixed_trace_extracted_answer": pair[
+                        "intervention_fixed_trace_extracted_answer"
+                    ],
+                    "baseline_fixed_trace_correctness_status": pair[
+                        "baseline_fixed_trace_correctness_status"
+                    ],
+                    "intervention_fixed_trace_correctness_status": pair[
+                        "intervention_fixed_trace_correctness_status"
+                    ],
+                }
+                for pair in row["pair_records"]
+            ],
+        }
+        for row in selected_results
+    ]
+    return {
+        "selected_examples.json": selected_examples,
+        "candidate_pools.json": candidate_pools,
+        "pair_records.json": pair_records,
+        "behavioural_readouts.json": behavioural_readouts,
+    }
+
+
 def run_diagnostic_pilot(
     *, repository_root: str | Path, authorization_document: str | Path
 ) -> dict[str, Any]:
@@ -357,54 +675,74 @@ def run_diagnostic_pilot(
     attempt = Path(payload["output_root"]) / (
         f"diagnostic-pilot-attempt-{payload['authorization_id']}-{timestamp}-{attempt_id}"
     )
-    claim_path, claim = claim_authorization_once(
-        authorization, attempt_id=attempt_id, attempt_directory=str(attempt)
-    )
     started = time.perf_counter()
-    attempt.mkdir(parents=True, exist_ok=False)
-    (attempt / "fullkv").mkdir()
-    (attempt / "rkv").mkdir()
-    atomic_write_json(
-        attempt / "invocation.json",
-        {
-            "command": EXACT_EXECUTION_COMMAND,
-            "authorization_document": str(authorization.document_path),
-            "execute": True,
-            "invocation_ordinal": 1,
-            "automatic_retries": 0,
-            "attempt_id": attempt_id,
-        },
-    )
-    atomic_write_json(attempt / "authorization_claim.json", claim)
-    atomic_write_json(attempt / "preflight.json", preflight)
-    runtime = verify_runtime_inputs(payload["runtime_config_path"])
-    atomic_write_json(
-        attempt / "protocol_binding.json",
-        {
-            "protocol_document_path": PROTOCOL_DOCUMENT_PATH,
-            "protocol_document_sha256": runtime["protocol_document_sha256"],
-            "runtime_config_path": payload["runtime_config_path"],
-            "runtime_config_canonical_sha256": runtime["canonical_sha256"],
-            "candidate_manifest_canonical_sha256": CANDIDATE_MANIFEST_CANONICAL_SHA256,
-            "model_revision": MODEL_REVISION,
-            "tokenizer_revision": TOKENIZER_REVISION,
-            "rkv_revision": RKV_REVISION,
-        },
-    )
-    atomic_write_json(
-        attempt / "environment.json",
-        {
-            "python": sys.version,
-            "platform": platform.platform(),
-            "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
-            "hf_hub_offline": os.environ.get("HF_HUB_OFFLINE"),
-            "transformers_offline": os.environ.get("TRANSFORMERS_OFFLINE"),
-        },
-    )
-    qualification_rows: list[dict[str, Any]] = []
-    fullkv_results: list[dict[str, Any]] = []
-    rkv_results: list[dict[str, Any]] = []
+    claim_path = Path(payload["claim_path"]).resolve()
     try:
+        claim_path, claim = claim_authorization_once(
+            authorization, attempt_id=attempt_id, attempt_directory=str(attempt)
+        )
+    except DiagnosticAuthorizationConsumed:
+        raise
+    except BaseException as exc:
+        # If atomic claim creation succeeded but its subsequent write/fsync
+        # failed, the authorization is nevertheless permanently consumed.
+        # Preserve that fact at the only safe boundary available here.
+        if claim_path.exists():
+            _preserve_consumed_failure(
+                attempt=attempt,
+                attempt_id=attempt_id,
+                claim_path=claim_path,
+                started=started,
+                exc=exc,
+            )
+        raise
+    try:
+        attempt.mkdir(parents=True, exist_ok=False)
+        (attempt / "fullkv").mkdir()
+        (attempt / "rkv").mkdir()
+        atomic_write_json(
+            attempt / "invocation.json",
+            {
+                "command": EXACT_EXECUTION_COMMAND,
+                "authorization_document": str(authorization.document_path),
+                "execute": True,
+                "invocation_ordinal": 1,
+                "automatic_retries": 0,
+                "attempt_id": attempt_id,
+            },
+        )
+        atomic_write_json(attempt / "authorization_claim.json", claim)
+        atomic_write_json(attempt / "preflight.json", preflight)
+        runtime = verify_runtime_inputs(payload["runtime_config_path"])
+        atomic_write_json(
+            attempt / "protocol_binding.json",
+            {
+                "protocol_document_path": PROTOCOL_DOCUMENT_PATH,
+                "protocol_document_sha256": runtime["protocol_document_sha256"],
+                "authorization_id": payload["authorization_id"],
+                "authorization_document_sha256": authorization.document_sha256,
+                "authorized_implementation_sha": payload["authorized_implementation_sha"],
+                "runtime_config_path": payload["runtime_config_path"],
+                "runtime_config_canonical_sha256": runtime["canonical_sha256"],
+                "candidate_manifest_canonical_sha256": CANDIDATE_MANIFEST_CANONICAL_SHA256,
+                "model_revision": MODEL_REVISION,
+                "tokenizer_revision": TOKENIZER_REVISION,
+                "rkv_revision": RKV_REVISION,
+            },
+        )
+        atomic_write_json(
+            attempt / "environment.json",
+            {
+                "python": sys.version,
+                "platform": platform.platform(),
+                "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+                "hf_hub_offline": os.environ.get("HF_HUB_OFFLINE"),
+                "transformers_offline": os.environ.get("TRANSFORMERS_OFFLINE"),
+            },
+        )
+        qualification_rows: list[dict[str, Any]] = []
+        fullkv_results: list[dict[str, Any]] = []
+        rkv_results: list[dict[str, Any]] = []
         config_path = repository_root / CONFIG_PATH
         prompts_path = Path(runtime["candidate_prompts_path"])
         qualified_count = 0
@@ -453,59 +791,10 @@ def run_diagnostic_pilot(
         summary = _summarize(qualification_rows, rkv_results)
         selected_ordinals = set(summary["selected_candidate_ordinals"])
         selected_results = [row for row in rkv_results if row["candidate_ordinal"] in selected_ordinals]
-        all_pairs = [pair for row in selected_results for pair in row["pair_records"]]
+        projections = _derived_projection_payloads(selected_results)
         atomic_write_json(attempt / "qualification.json", qualification_rows)
-        atomic_write_json(
-            attempt / "selected_examples.json",
-            [
-                {
-                    "candidate_ordinal": row["candidate_ordinal"],
-                    "unique_id": row["unique_id"],
-                    "selected_event": row["selected_event"],
-                }
-                for row in selected_results
-            ],
-        )
-        atomic_write_json(
-            attempt / "candidate_pools.json",
-            [row["selected_event"] for row in selected_results],
-        )
-        atomic_write_json(attempt / "pair_records.json", all_pairs)
-        atomic_write_json(
-            attempt / "behavioural_readouts.json",
-            [
-                {
-                    "candidate_ordinal": row["candidate_ordinal"],
-                    "unique_id": row["unique_id"],
-                    "fixed_trace_extracted_answer": row["fixed_trace_extracted_answer"],
-                    "fixed_trace_correctness_status": row["fixed_trace_correctness_status"],
-                    "free_running_answer_flip_available": False,
-                    "pairs": [
-                        {
-                            "arm": pair["arm"],
-                            "candidate_absolute_position": pair["candidate_absolute_position"],
-                            "baseline_answer_token_margins": pair["baseline_answer_token_margins"],
-                            "intervention_answer_token_margins": pair["intervention_answer_token_margins"],
-                            "answer_margin_sign_change": pair["answer_margin_sign_change"],
-                            "baseline_fixed_trace_extracted_answer": pair[
-                                "baseline_fixed_trace_extracted_answer"
-                            ],
-                            "intervention_fixed_trace_extracted_answer": pair[
-                                "intervention_fixed_trace_extracted_answer"
-                            ],
-                            "baseline_fixed_trace_correctness_status": pair[
-                                "baseline_fixed_trace_correctness_status"
-                            ],
-                            "intervention_fixed_trace_correctness_status": pair[
-                                "intervention_fixed_trace_correctness_status"
-                            ],
-                        }
-                        for pair in row["pair_records"]
-                    ],
-                }
-                for row in selected_results
-            ],
-        )
+        for name, projection in projections.items():
+            atomic_write_json(attempt / name, projection)
         atomic_write_json(attempt / "scientific_summary.json", summary)
         runtime_seconds = time.perf_counter() - started
         peak_vram = max(
@@ -519,6 +808,7 @@ def run_diagnostic_pilot(
             "peak_cuda_allocated_bytes": peak_vram,
             "peak_tracked_cuda_bytes": peak_vram,
             "claim_path": str(claim_path),
+            "claim_canonical_sha256": claim["canonical_sha256"],
             "retry_allowed": False,
         }
         atomic_write_json(attempt / "completion.json", completion)
@@ -540,29 +830,14 @@ def run_diagnostic_pilot(
             "retry_allowed": False,
         }
     except BaseException as exc:
-        failure = {
-            "completed": False,
-            "failure_type": type(exc).__name__,
-            "failure_message": str(exc),
-            "claim_path": str(claim_path),
-            "authorization_consumed": True,
-            "retry_allowed": False,
-            "runtime_seconds": time.perf_counter() - started,
-        }
-        try:
-            atomic_write_json(attempt / "completion.json", failure)
-            atomic_write_json(
-                attempt / "final.json",
-                {
-                    "attempt_id": attempt_id,
-                    "claim_path": str(claim_path),
-                    "classification": "void",
-                    "failure": failure,
-                    "references": _attempt_references(attempt),
-                },
-            )
-        finally:
-            raise
+        _preserve_consumed_failure(
+            attempt=attempt,
+            attempt_id=attempt_id,
+            claim_path=claim_path,
+            started=started,
+            exc=exc,
+        )
+        raise
 
 
 def verify_attempt(attempt_directory: str | Path) -> dict[str, Any]:
@@ -577,6 +852,8 @@ def verify_attempt(attempt_directory: str | Path) -> dict[str, Any]:
         if sha256_file(path) != reference["sha256"] or path.stat().st_size != reference["size_bytes"]:
             raise DiagnosticExecutionRefused(f"attempt reference mismatch: {reference['relative_path']}")
     claim = verify_claim(attempt / "authorization_claim.json")
+    if final.get("claim_canonical_sha256") != claim.get("canonical_sha256"):
+        raise DiagnosticExecutionRefused("final stored claim canonical hash mismatch")
     if claim.get("attempt_id") != final.get("attempt_id"):
         raise DiagnosticExecutionRefused("claim attempt ID does not match final")
     if Path(claim.get("attempt_directory", "")).resolve() != attempt:
@@ -586,11 +863,38 @@ def verify_attempt(attempt_directory: str | Path) -> dict[str, Any]:
         attempt / "authorization_claim.json"
     ):
         raise DiagnosticExecutionRefused("external claim and attempt claim copy differ")
+    if (attempt / "protocol_binding.json").exists():
+        binding = json.loads((attempt / "protocol_binding.json").read_text(encoding="utf-8"))
+        if binding.get("authorization_id") != claim.get("authorization_id"):
+            raise DiagnosticExecutionRefused("protocol binding authorization ID mismatch")
+        if binding.get("authorization_document_sha256") != claim.get(
+            "authorization_document_sha256"
+        ):
+            raise DiagnosticExecutionRefused("protocol binding authorization document mismatch")
+        if binding.get("authorized_implementation_sha") != claim.get(
+            "authorized_implementation_sha"
+        ):
+            raise DiagnosticExecutionRefused("protocol binding implementation SHA mismatch")
     if (attempt / "scientific_summary.json").exists():
         qualification = json.loads((attempt / "qualification.json").read_text(encoding="utf-8"))
         rkv_results = [json.loads(path.read_text(encoding="utf-8")) for path in sorted((attempt / "rkv").glob("candidate-*.json"))]
+        reconstructed_qualification = []
+        for row in rkv_results:
+            qualification_row = dict(row["qualification"])
+            qualification_row["candidate_ordinal"] = row["candidate_ordinal"]
+            reconstructed_qualification.append(qualification_row)
+        if qualification != reconstructed_qualification:
+            raise DiagnosticExecutionRefused("qualification projection differs from worker primitives")
         reconstructed = _summarize(qualification, rkv_results)
         stored = json.loads((attempt / "scientific_summary.json").read_text(encoding="utf-8"))
         if reconstructed != stored:
             raise DiagnosticExecutionRefused("primitive records do not reconstruct the stored scientific summary")
+        selected_ordinals = set(reconstructed["selected_candidate_ordinals"])
+        selected_results = [
+            row for row in rkv_results if row["candidate_ordinal"] in selected_ordinals
+        ]
+        for name, expected in _derived_projection_payloads(selected_results).items():
+            observed = json.loads((attempt / name).read_text(encoding="utf-8"))
+            if observed != expected:
+                raise DiagnosticExecutionRefused(f"{name} differs from worker primitives")
     return {"verified": True, "attempt_directory": str(attempt), "final_sha256": sha256_file(attempt / "final.json")}

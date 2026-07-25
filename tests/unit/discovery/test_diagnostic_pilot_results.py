@@ -3,15 +3,19 @@ from pathlib import Path
 
 import pytest
 
-from kvcot.discovery.attempt_artifacts import atomic_write_json
+from kvcot.discovery.attempt_artifacts import atomic_write_json, sha256_file
 from kvcot.discovery.diagnostic_pilot_authorization import (
     AUTHORIZATION_JSON_BEGIN,
     AUTHORIZATION_JSON_END,
 )
 from kvcot.discovery.diagnostic_pilot_contract import (
     BRANCH,
+    CANDIDATE_MANIFEST_PATH,
+    CONFIG_PATH,
     EXACT_EXECUTION_COMMAND,
     MODEL_REVISION,
+    PAIR_SCHEMA_VERSION,
+    PROTOCOL_DOCUMENT_PATH,
     REPOSITORY,
     RKV_REVISION,
     TOKENIZER_REVISION,
@@ -47,14 +51,36 @@ def pair(arm, gain, *, margin=False, candidate=1, donor=9):
     intervention_mean = sum(intervention) / len(intervention)
     before_margin = -0.5 if margin else 0.5
     after_margin = 0.5
+    kv_heads = [0, 1] if arm == "restore_width" else [0]
+    donor_slots = {"0": 3, **({"1": 4} if arm == "restore_width" else {})}
+
+    def margin_row(value):
+        alternative_logp = -2.0
+        reference_logp = alternative_logp + value
+        return {
+            "absolute_position": 5,
+            "reference_token_id": 7,
+            "strongest_alternative_token_id": 8,
+            "reference_log_probability": reference_logp,
+            "correct_answer_log_probability": reference_logp,
+            "strongest_alternative_log_probability": alternative_logp,
+            "margin": value,
+            "is_correct_answer_token": True,
+        }
+
     return {
+        "artifact_schema_version": PAIR_SCHEMA_VERSION,
         "arm": arm,
         "diagnostic_only": arm == "candidate_upper_bound",
         "deployable_performance": False,
         "restore_width": 2 if arm == "restore_width" else 1,
-        "kv_head_indices": [0, 1] if arm == "restore_width" else [0],
+        "compaction_event_id": 2,
+        "layer_index": 4,
+        "selected_kv_head": 0,
+        "kv_head_indices": kv_heads,
         "candidate_absolute_position": candidate,
         "donor_absolute_position": donor,
+        "donor_post_storage_positions_by_head": donor_slots,
         "baseline_scored_token_ids": list(range(48)),
         "intervention_scored_token_ids": list(range(48)),
         "baseline_per_token_nll": baseline,
@@ -62,8 +88,8 @@ def pair(arm, gain, *, margin=False, candidate=1, donor=9):
         "baseline_mean_nll": baseline_mean,
         "intervention_mean_nll": intervention_mean,
         "swap_gain": baseline_mean - intervention_mean,
-        "baseline_answer_token_margins": [{"absolute_position": 5, "margin": before_margin}],
-        "intervention_answer_token_margins": [{"absolute_position": 5, "margin": after_margin}],
+        "baseline_answer_token_margins": [margin_row(before_margin)],
+        "intervention_answer_token_margins": [margin_row(after_margin)],
         "answer_margin_sign_change": margin,
         "baseline_fixed_trace_extracted_answer": "1",
         "intervention_fixed_trace_extracted_answer": "1",
@@ -73,21 +99,62 @@ def pair(arm, gain, *, margin=False, candidate=1, donor=9):
         "fixed_trace_correctness_change": False,
         "baseline_final_state_sha256": "a" * 64,
         "intervention_final_state_sha256": "a" * 64,
-        "mutation": {"is_noop": arm == "no_op"},
+        "mutation": {
+            "layer_index": 4,
+            "kv_head_indices": kv_heads,
+            "token_positions_by_head": [
+                [head, donor_slots[str(head)]] for head in kv_heads
+            ],
+            "cache_shape_unchanged": True,
+            "absolute_position_unchanged": True,
+            "provenance_valid": True,
+            "key_slots_changed": 0 if arm == "no_op" else len(kv_heads),
+            "value_slots_changed": 0 if arm == "no_op" else len(kv_heads),
+            "is_noop": arm == "no_op",
+        },
     }
 
 
 def result(ordinal, *, a=0.0, b=0.0, margin=False, noop=True):
-    return {
+    payload = {
+        "role": "diagnostic_rkv",
+        "model_revision": MODEL_REVISION,
+        "tokenizer_revision": TOKENIZER_REVISION,
+        "rkv_revision": RKV_REVISION,
+        "architecture": {"num_attention_heads": 12, "num_key_value_heads": 2},
         "candidate_ordinal": ordinal,
         "unique_id": f"row-{ordinal}",
         "selected_event": {
+            "event_index": 2,
+            "absolute_event_position": 100,
+            "layer_index": 4,
+            "selected_kv_head": 0,
+            "deployable_event_score": 0.9,
             "donor_absolute_position": 9,
             "candidate_pool": [
-                {"absolute_token_position": 1},
-                {"absolute_token_position": 2},
-            ]
+                {"absolute_token_position": 1, "deployable_score": 0.9},
+                {"absolute_token_position": 2, "deployable_score": 0.8},
+            ],
+            "candidate_pool_frozen_before_intervention": True,
+            "candidate_pool_diagnostic_only": True,
         },
+        "eligible_event_score_evidence": [
+            {
+                "event_index": 2,
+                "absolute_event_position": 100,
+                "layer_index": 4,
+                "selected_kv_head": 0,
+                "deployable_event_score": 0.9,
+                "candidate_pool": [
+                    {"absolute_token_position": 1, "deployable_score": 0.9},
+                    {"absolute_token_position": 2, "deployable_score": 0.8},
+                ],
+                "captured_before_intervention": True,
+                "rank_zero_candidate_available_in_all_kv_heads": True,
+            }
+        ],
+        "score_replay_retained_full_snapshots": 0,
+        "selected_snapshot_count": 1,
         "pair_records": [
             pair("candidate_upper_bound", a, margin=margin, candidate=1),
             pair("candidate_upper_bound", a / 2, candidate=2),
@@ -95,7 +162,14 @@ def result(ordinal, *, a=0.0, b=0.0, margin=False, noop=True):
             pair("no_op", 0.0, candidate=9),
         ],
         "noop_exact": noop,
+        "fixed_trace_extracted_answer": "1",
+        "fixed_trace_correctness_status": "correct",
+        "free_running_answer_flip_available": False,
     }
+    for rank, candidate_pair in enumerate(payload["pair_records"][:2]):
+        candidate_pair["candidate_pool_rank"] = rank
+        candidate_pair["is_control_candidate"] = rank == 0
+    return payload
 
 
 @pytest.mark.parametrize(
@@ -136,6 +210,54 @@ def test_incomplete_pair_population_voids_result():
     assert summary["classification"] == "void"
 
 
+@pytest.mark.parametrize("mutation", ("pool_order", "event_choice", "pair_identity", "slot_map"))
+def test_strict_primitive_reconstruction_voids_semantic_tampering(mutation):
+    results = [result(index) for index in range(3)]
+    target = results[0]
+    if mutation == "pool_order":
+        target["selected_event"]["candidate_pool"].reverse()
+    elif mutation == "event_choice":
+        target["eligible_event_score_evidence"].append(
+            {
+                "event_index": 1,
+                "absolute_event_position": 90,
+                "layer_index": 3,
+                "selected_kv_head": 1,
+                "deployable_event_score": 1.1,
+                "candidate_pool": [
+                    {"absolute_token_position": 4, "deployable_score": 1.1},
+                    {"absolute_token_position": 5, "deployable_score": 1.0},
+                ],
+                "captured_before_intervention": True,
+                "rank_zero_candidate_available_in_all_kv_heads": True,
+            }
+        )
+    elif mutation == "pair_identity":
+        target["pair_records"][0]["layer_index"] = 5
+    else:
+        target["pair_records"][0]["mutation"]["token_positions_by_head"] = [[0, 2]]
+    summary = _summarize([qualification(index) for index in range(3)], results)
+    assert summary["classification"] == "void"
+
+
+def test_incorrect_answer_token_margin_sign_change_is_not_arm_c_movement():
+    results = [result(index, margin=True) for index in range(3)]
+    for row in results:
+        for candidate_pair in row["pair_records"]:
+            candidate_pair["answer_margin_sign_change"] = False
+            for key in (
+                "baseline_answer_token_margins",
+                "intervention_answer_token_margins",
+            ):
+                for margin_row in candidate_pair[key]:
+                    margin_row["is_correct_answer_token"] = False
+                    margin_row["correct_answer_log_probability"] = None
+    summary = _summarize([qualification(index) for index in range(3)], results)
+    assert summary["primitive_populations_reconstructed"] is True
+    assert summary["behavioural_change"] is False
+    assert summary["classification"] == "mechanism_killed_at_1_5b"
+
+
 def test_fewer_than_three_qualified_is_mechanically_unqualified():
     summary = _summarize(
         [qualification(0), qualification(1)],
@@ -150,6 +272,15 @@ def write_authorization(tmp_path):
     document.parent.mkdir(parents=True)
     claim = tmp_path / "claim.json"
     output_root = tmp_path / "execution"
+    audit = tmp_path / "implementation-audit.md"
+    audit.write_text("PASS synthetic audit\n", encoding="utf-8")
+    source_root = Path(__file__).resolve().parents[3]
+    for relative_path in (PROTOCOL_DOCUMENT_PATH, CONFIG_PATH, CANDIDATE_MANIFEST_PATH):
+        source = source_root / relative_path
+        destination = repository / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.read_bytes())
+    protocol_sha256 = sha256_file(repository / PROTOCOL_DOCUMENT_PATH)
     payload = attach_canonical_hash(
         {
             "authorization_id": "synthetic-coordinator",
@@ -164,12 +295,14 @@ def write_authorization(tmp_path):
             "claim_path": str(claim),
             "runtime_config_path": str(tmp_path / "runtime.json"),
             "runtime_config_canonical_sha256": "b" * 64,
-            "protocol_document_sha256": "c" * 64,
+            "protocol_document_sha256": protocol_sha256,
             "candidate_manifest_canonical_sha256": (
                 "b8148647698ca5ab5335ea28dc1416109b26f73dd05b87eed2fe9eca4b25ff42"
             ),
             "output_root": str(output_root),
-            "implementation_audit_sha256": "e" * 64,
+            "implementation_audit_path": str(audit),
+            "implementation_audit_sha256": sha256_file(audit),
+            "implementation_audit_verdict": "PASS",
             "maximum_qualification_candidates": 8,
             "maximum_selected_examples": 3,
             "maximum_selected_events": 3,
@@ -197,7 +330,8 @@ def test_dry_run_is_non_consuming_and_requests_no_cuda_or_weights(tmp_path, monk
         "kvcot.discovery.diagnostic_pilot_execute.verify_runtime_inputs",
         lambda _path: {
             "canonical_sha256": "b" * 64,
-            "protocol_document_sha256": "c" * 64,
+            "protocol_document_sha256": sha256_file(repository / PROTOCOL_DOCUMENT_PATH),
+            "config_byte_sha256": sha256_file(repository / CONFIG_PATH),
             "model_snapshot_path": "/exact/model",
             "tokenizer_snapshot_path": "/exact/tokenizer",
         },
@@ -277,3 +411,137 @@ def test_fake_worker_coordinator_writes_reconstructable_immutable_attempt(tmp_pa
     assert json.loads((attempt / "scientific_summary.json").read_text())["classification"] == (
         "mechanism_killed_at_1_5b"
     )
+    final_path = attempt / "final.json"
+    final = json.loads(final_path.read_text(encoding="utf-8"))
+    final["claim_canonical_sha256"] = "0" * 64
+    final_path.write_text(json.dumps(final, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(Exception, match="claim canonical hash mismatch"):
+        verify_attempt(attempt)
+
+
+def test_post_claim_setup_failure_is_preserved_inside_attempt(tmp_path, monkeypatch):
+    repository, document, claim_path, _output_root = write_authorization(tmp_path)
+    monkeypatch.setattr(
+        "kvcot.discovery.diagnostic_pilot_execute._preflight",
+        lambda *_args: {"passed": True, "would_initialize_cuda": False},
+    )
+    monkeypatch.setattr(
+        "kvcot.discovery.diagnostic_pilot_execute.verify_runtime_inputs",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("synthetic runtime setup failure")),
+    )
+    with pytest.raises(RuntimeError, match="synthetic runtime setup failure"):
+        run_diagnostic_pilot(repository_root=repository, authorization_document=document)
+    claim = json.loads(claim_path.read_text(encoding="utf-8"))
+    attempt = Path(claim["attempt_directory"])
+    completion = json.loads((attempt / "completion.json").read_text(encoding="utf-8"))
+    final = json.loads((attempt / "final.json").read_text(encoding="utf-8"))
+    assert completion["authorization_consumed"] is True
+    assert completion["retry_allowed"] is False
+    assert final["classification"] == "void"
+    assert verify_attempt(attempt)["verified"] is True
+
+
+@pytest.mark.parametrize(
+    ("kind", "target"),
+    [
+        ("directory", "fullkv"),
+        ("directory", "rkv"),
+        ("artifact", "invocation.json"),
+        ("artifact", "authorization_claim.json"),
+        ("artifact", "preflight.json"),
+        ("artifact", "protocol_binding.json"),
+        ("artifact", "environment.json"),
+    ],
+)
+def test_every_post_claim_setup_boundary_preserves_failure(
+    tmp_path, monkeypatch, kind, target
+):
+    repository, document, claim_path, _output_root = write_authorization(tmp_path)
+    monkeypatch.setattr(
+        "kvcot.discovery.diagnostic_pilot_execute._preflight",
+        lambda *_args: {"passed": True, "would_initialize_cuda": False},
+    )
+    monkeypatch.setattr(
+        "kvcot.discovery.diagnostic_pilot_execute.verify_runtime_inputs",
+        lambda _path: {
+            "protocol_document_sha256": "c" * 64,
+            "canonical_sha256": "b" * 64,
+            "candidate_prompts_path": str(tmp_path / "prompts.json"),
+        },
+    )
+    if kind == "directory":
+        original_mkdir = Path.mkdir
+
+        def injected_mkdir(path, *args, **kwargs):
+            if path.name == target:
+                raise OSError(f"synthetic {target} setup failure")
+            return original_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", injected_mkdir)
+    else:
+        original_write = atomic_write_json
+        failed = {"value": False}
+
+        def injected_write(path, payload):
+            if path.name == target and not failed["value"]:
+                failed["value"] = True
+                raise OSError(f"synthetic {target} setup failure")
+            return original_write(path, payload)
+
+        monkeypatch.setattr(
+            "kvcot.discovery.diagnostic_pilot_execute.atomic_write_json",
+            injected_write,
+        )
+    with pytest.raises(OSError, match="setup failure"):
+        run_diagnostic_pilot(repository_root=repository, authorization_document=document)
+    claim = json.loads(claim_path.read_text(encoding="utf-8"))
+    attempt = Path(claim["attempt_directory"])
+    assert json.loads((attempt / "completion.json").read_text())["retry_allowed"] is False
+    assert json.loads((attempt / "final.json").read_text())["classification"] == "void"
+
+
+def test_post_claim_attempt_creation_failure_uses_claim_directory_fallback(tmp_path, monkeypatch):
+    repository, document, claim_path, _output_root = write_authorization(tmp_path)
+    monkeypatch.setattr(
+        "kvcot.discovery.diagnostic_pilot_execute._preflight",
+        lambda *_args: {"passed": True, "would_initialize_cuda": False},
+    )
+    original_mkdir = Path.mkdir
+
+    def fail_attempt_mkdir(path, *args, **kwargs):
+        if path.name.startswith("diagnostic-pilot-attempt-"):
+            raise OSError("synthetic attempt mkdir failure")
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_attempt_mkdir)
+    with pytest.raises(OSError, match="synthetic attempt mkdir failure"):
+        run_diagnostic_pilot(repository_root=repository, authorization_document=document)
+    fallback = claim_path.with_name(f"{claim_path.name}.failure.json")
+    failure = json.loads(fallback.read_text(encoding="utf-8"))
+    assert failure["authorization_consumed"] is True
+    assert failure["retry_allowed"] is False
+    assert failure["failure_type"] == "OSError"
+
+
+def test_claim_write_failure_after_creation_is_preserved_without_retry(tmp_path, monkeypatch):
+    repository, document, claim_path, _output_root = write_authorization(tmp_path)
+    monkeypatch.setattr(
+        "kvcot.discovery.diagnostic_pilot_execute._preflight",
+        lambda *_args: {"passed": True, "would_initialize_cuda": False},
+    )
+
+    def consume_then_fail(_authorization, *, attempt_id, attempt_directory):
+        claim_path.write_text("{\n", encoding="utf-8")
+        raise OSError("synthetic claim write failure after consumption")
+
+    monkeypatch.setattr(
+        "kvcot.discovery.diagnostic_pilot_execute.claim_authorization_once",
+        consume_then_fail,
+    )
+    with pytest.raises(OSError, match="after consumption"):
+        run_diagnostic_pilot(repository_root=repository, authorization_document=document)
+    failure_path = claim_path.with_name(f"{claim_path.name}.failure.json")
+    failure = json.loads(failure_path.read_text(encoding="utf-8"))
+    assert failure["authorization_consumed"] is True
+    assert failure["retry_allowed"] is False
+    assert failure["failure_type"] == "OSError"

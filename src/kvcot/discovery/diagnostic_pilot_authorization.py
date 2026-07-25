@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import tempfile
 from typing import Any
 
 from kvcot.discovery.attempt_artifacts import atomic_write_json, sha256_file
@@ -83,6 +84,7 @@ def parse_authorization_document(path: str | Path) -> VerifiedDiagnosticAuthoriz
         "runtime_limit_seconds": RUNTIME_LIMIT_SECONDS,
         "exact_command": EXACT_EXECUTION_COMMAND,
         "candidate_manifest_canonical_sha256": CANDIDATE_MANIFEST_CANONICAL_SHA256,
+        "implementation_audit_verdict": "PASS",
     }
     for key, expected in required.items():
         if payload.get(key) != expected:
@@ -97,12 +99,23 @@ def parse_authorization_document(path: str | Path) -> VerifiedDiagnosticAuthoriz
         length = 40 if key == "authorized_implementation_sha" else 64
         if not isinstance(value, str) or re.fullmatch(rf"[0-9a-f]{{{length}}}", value) is None:
             raise DiagnosticAuthorizationRefused(f"authorization {key} is not an exact lowercase hash")
-    for key in ("authorization_id", "claim_path", "runtime_config_path", "output_root"):
+    for key in (
+        "authorization_id",
+        "claim_path",
+        "runtime_config_path",
+        "output_root",
+        "implementation_audit_path",
+    ):
         if not isinstance(payload.get(key), str) or not payload[key]:
             raise DiagnosticAuthorizationRefused(f"authorization {key} must be a non-empty string")
-    for key in ("claim_path", "runtime_config_path", "output_root"):
+    for key in ("claim_path", "runtime_config_path", "output_root", "implementation_audit_path"):
         if not Path(payload[key]).is_absolute():
             raise DiagnosticAuthorizationRefused(f"authorization {key} must be an absolute path")
+    audit_path = Path(payload["implementation_audit_path"])
+    if not audit_path.is_file():
+        raise DiagnosticAuthorizationRefused("bound implementation audit file is absent")
+    if sha256_file(audit_path) != payload["implementation_audit_sha256"]:
+        raise DiagnosticAuthorizationRefused("bound implementation audit file hash mismatch")
     return VerifiedDiagnosticAuthorization(document_path, sha256_file(document_path), payload)
 
 
@@ -128,17 +141,35 @@ def claim_authorization_once(
             "retry_allowed": False,
         }
     )
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    data = (json.dumps(claim, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{claim_path.name}.", suffix=".claim.tmp", dir=str(claim_path.parent)
+    )
+    temporary_path = Path(temporary_name)
     try:
-        descriptor = os.open(claim_path, flags, 0o444)
-    except FileExistsError as exc:
-        raise DiagnosticAuthorizationConsumed(f"authorization already consumed at {claim_path}") from exc
-    try:
-        data = (json.dumps(claim, sort_keys=True, indent=2) + "\n").encode("utf-8")
-        os.write(descriptor, data)
-        os.fsync(descriptor)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+            os.fchmod(handle.fileno(), 0o444)
+        try:
+            # A same-filesystem hard link atomically exposes complete bytes
+            # and fails if another invocation already owns the claim path.
+            os.link(temporary_path, claim_path)
+        except FileExistsError as exc:
+            raise DiagnosticAuthorizationConsumed(
+                f"authorization already consumed at {claim_path}"
+            ) from exc
+        directory_descriptor = os.open(claim_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
     finally:
-        os.close(descriptor)
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
     return claim_path, claim
 
 

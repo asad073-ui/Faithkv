@@ -12,6 +12,13 @@
 - Added an isolated diagnostic namespace, strict same-layer restore primitive,
   separate worker processes, atomic one-use claim, non-consuming dry-run,
   immutable evidence artifacts, independent reconstruction, and CPU tests.
+- The post-claim exception boundary covers attempt setup as well as workers;
+  setup failures preserve a void completion/final artifact or, if no attempt
+  directory can be created, a claim-directory failure record with no retry.
+- Claim-call failures are also preserved if path creation already consumed
+  the authorization; preflight binds the checked-out protocol, config, and
+  manifest bytes, and reconstruction validates architecture, mutation, and
+  answer-margin primitives before accepting aggregates.
 - No Stage-C code/evidence/claim/attempt changed; no GPU run, B2B run, model
   weights, claim, or attempt artifact is committed by this entry.
 
