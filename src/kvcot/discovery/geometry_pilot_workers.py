@@ -189,19 +189,28 @@ def _resolve_post_event_vector(pristine_snapshot: Any, *, layer_index: int, kv_h
     return key, value
 
 
-def _mutation_for(
+def _try_mutation_for(
     pristine_snapshot: Any, *, capture_record: Any, anchor_layer_index: int,
     layer_index: int, kv_head_index: int,
     candidate_absolute_position: int, donor_absolute_position: int,
-) -> KVMutationSpec:
-    # The candidate's ORIGINAL content: at the anchor layer, the anchor
-    # event may have just evicted it there (candidate_absolute_position ==
-    # donor_absolute_position for the no-op arm is the one exception,
-    # where "candidate" is actually the donor's own surviving content and
-    # the post-event snapshot is correct) -- resolve from the pre-event
-    # capture at the anchor layer, and from the post-event snapshot at
-    # every other layer (Arm L/HL's non-anchor layers, never captured
-    # pre-event by this pilot).
+) -> KVMutationSpec | None:
+    """Resolve one mutation, or return `None` if either endpoint is not
+    resolvable -- R-KV evicts independently per (layer, kv_head), so
+    neither "the candidate is resolvable at every head of the anchor
+    layer" nor "at every layer for a fixed head" can be assumed; every
+    multi-instance arm (H, HL, SH) must tolerate a given (layer, head)
+    combination simply not having the candidate available (evicted at an
+    EARLIER, untracked event for that specific (layer, head), not by the
+    anchor event) and exclude it, never crash or invent a value.
+
+    The candidate's ORIGINAL content: at the anchor layer, the anchor
+    event may have just evicted it there (candidate_absolute_position ==
+    donor_absolute_position for the no-op arm is the one exception, where
+    "candidate" is actually the donor's own surviving content and the
+    post-event snapshot is correct) -- resolve from the pre-event capture
+    at the anchor layer, and from the post-event snapshot at every other
+    layer (Arm L/HL's non-anchor layers, never captured pre-event by this
+    pilot)."""
     if layer_index == anchor_layer_index and candidate_absolute_position != donor_absolute_position:
         candidate_key, candidate_value = _resolve_pre_event_vector(
             capture_record, kv_head_index=kv_head_index, absolute_position=candidate_absolute_position,
@@ -212,19 +221,17 @@ def _mutation_for(
             absolute_position=candidate_absolute_position,
         )
     if candidate_key is None:
-        raise GeometryWorkerError(
-            f"candidate {candidate_absolute_position} not resolvable at layer {layer_index}, head {kv_head_index}"
-        )
+        return None
     # The donor's WRITE-TARGET slot is always the current (post-event)
     # physical layout -- a donor is a survivor by definition, never
     # evicted by the anchor event, so its post-event slot is where the
     # mutation must actually write.
     donor_layer_provenance = pristine_snapshot.provenance.layers.get(layer_index)
+    if donor_layer_provenance is None:
+        return None
     donor_slot = resolve_physical_position(donor_layer_provenance.positions, kv_head_index, donor_absolute_position)
     if donor_slot is None:
-        raise GeometryWorkerError(
-            f"donor {donor_absolute_position} not resolvable at layer {layer_index}, head {kv_head_index}"
-        )
+        return None
     return KVMutationSpec(
         layer_index=layer_index,
         kv_head_index=kv_head_index,
@@ -234,6 +241,42 @@ def _mutation_for(
         donor_absolute_position=donor_absolute_position,
         candidate_absolute_position=candidate_absolute_position,
     )
+
+
+def _mutation_for(
+    pristine_snapshot: Any, *, capture_record: Any, anchor_layer_index: int,
+    layer_index: int, kv_head_index: int,
+    candidate_absolute_position: int, donor_absolute_position: int,
+) -> KVMutationSpec:
+    """Strict variant for arms whose single (layer, head) combination was
+    already validated by a pre-outcome availability check (candidate pool
+    freezing, layer-set freezing, span-availability freezing) -- a failure
+    here is a genuine evidence-integrity defect, not an expected partial-
+    coverage case, so it raises rather than silently excluding."""
+    mutation = _try_mutation_for(
+        pristine_snapshot, capture_record=capture_record, anchor_layer_index=anchor_layer_index,
+        layer_index=layer_index, kv_head_index=kv_head_index,
+        candidate_absolute_position=candidate_absolute_position, donor_absolute_position=donor_absolute_position,
+    )
+    if mutation is None:
+        # Distinguish candidate-side vs donor-side failure for a clearer message.
+        if layer_index == anchor_layer_index and candidate_absolute_position != donor_absolute_position:
+            candidate_key, _ = _resolve_pre_event_vector(
+                capture_record, kv_head_index=kv_head_index, absolute_position=candidate_absolute_position,
+            )
+        else:
+            candidate_key, _ = _resolve_post_event_vector(
+                pristine_snapshot, layer_index=layer_index, kv_head_index=kv_head_index,
+                absolute_position=candidate_absolute_position,
+            )
+        if candidate_key is None:
+            raise GeometryWorkerError(
+                f"candidate {candidate_absolute_position} not resolvable at layer {layer_index}, head {kv_head_index}"
+            )
+        raise GeometryWorkerError(
+            f"donor {donor_absolute_position} not resolvable at layer {layer_index}, head {kv_head_index}"
+        )
+    return mutation
 
 
 def build_frozen_branch_mutations(
@@ -257,29 +300,50 @@ def build_frozen_branch_mutations(
             candidate_absolute_position=candidate, donor_absolute_position=donor,
         )
 
+    def try_mutation(layer, head, candidate, donor):
+        return _try_mutation_for(
+            pristine_snapshot, capture_record=capture_record, anchor_layer_index=ANCHOR_LAYER_INDEX,
+            layer_index=layer, kv_head_index=head,
+            candidate_absolute_position=candidate, donor_absolute_position=donor,
+        )
+
     mutations: dict[str, list[KVMutationSpec] | None] = {}
 
+    # C1/C2 use the single, already-frozen candidate pool entries at the
+    # anchor (layer, head) -- a resolution failure here is a genuine
+    # evidence-integrity defect (this exact pair was already causally
+    # tested in the immutable R2 evidence), so these stay strict.
     mutations[ARM_C1] = [
         mutation(ANCHOR_LAYER_INDEX, ANCHOR_KV_HEAD_INDEX, RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION, PRIMARY_DONOR_ABSOLUTE_POSITION)
     ]
     mutations[ARM_C2] = [
         mutation(ANCHOR_LAYER_INDEX, ANCHOR_KV_HEAD_INDEX, RANK_ONE_CANDIDATE_ABSOLUTE_POSITION, PRIMARY_DONOR_ABSOLUTE_POSITION)
     ]
-    mutations[ARM_H] = [
-        mutation(ANCHOR_LAYER_INDEX, head, RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION, PRIMARY_DONOR_ABSOLUTE_POSITION)
-        for head in all_heads
-    ]
+
+    # H: best-effort across all KV heads at the anchor layer -- R-KV
+    # evicts independently per (layer, head), so not every head is
+    # guaranteed to still have the candidate available (pre-event) at
+    # this exact call; a head where it is not available is excluded,
+    # never invented. At least the anchor head itself is always included
+    # (identical to Arm C1's own resolution).
+    arm_h = [try_mutation(ANCHOR_LAYER_INDEX, head, RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION, PRIMARY_DONOR_ABSOLUTE_POSITION) for head in all_heads]
+    mutations[ARM_H] = [m for m in arm_h if m is not None]
 
     if layer_set["available"]:
         mutations[ARM_L] = [
             mutation(layer, ANCHOR_KV_HEAD_INDEX, RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION, PRIMARY_DONOR_ABSOLUTE_POSITION)
             for layer in layer_set["valid_layer_indices"]
         ]
-        mutations[ARM_HL] = [
-            mutation(layer, head, RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION, PRIMARY_DONOR_ABSOLUTE_POSITION)
+        # HL: best-effort across all (valid layer x KV head) pairs -- a
+        # layer already known valid for the ANCHOR head (layer_set) is not
+        # guaranteed valid for every OTHER head too (same per-(layer,head)
+        # independence as Arm H).
+        arm_hl = [
+            try_mutation(layer, head, RANK_ZERO_CANDIDATE_ABSOLUTE_POSITION, PRIMARY_DONOR_ABSOLUTE_POSITION)
             for layer in layer_set["valid_layer_indices"]
             for head in all_heads
         ]
+        mutations[ARM_HL] = [m for m in arm_hl if m is not None]
     else:
         mutations[ARM_L] = None
         mutations[ARM_HL] = None
@@ -296,13 +360,18 @@ def build_frozen_branch_mutations(
         mutations[ARM_S] = [mutation(ANCHOR_LAYER_INDEX, ANCHOR_KV_HEAD_INDEX, middle, PRIMARY_DONOR_ABSOLUTE_POSITION)] + [
             mutation(ANCHOR_LAYER_INDEX, ANCHOR_KV_HEAD_INDEX, position, position) for position in neighbors
         ]
-        mutations[ARM_SH] = [
-            mutation(ANCHOR_LAYER_INDEX, head, middle, PRIMARY_DONOR_ABSOLUTE_POSITION) for head in all_heads
-        ] + [
-            mutation(ANCHOR_LAYER_INDEX, head, position, position)
-            for position in neighbors
-            for head in all_heads
-        ]
+        # SH: best-effort per head -- a head only contributes its full
+        # 3-position span if ALL THREE positions resolve for that specific
+        # head (keeping "span restored" a coherent, all-or-nothing
+        # statement per head, never a partial span for a given head).
+        arm_sh: list[KVMutationSpec] = []
+        for head in all_heads:
+            head_middle = try_mutation(ANCHOR_LAYER_INDEX, head, middle, PRIMARY_DONOR_ABSOLUTE_POSITION)
+            head_neighbors = [try_mutation(ANCHOR_LAYER_INDEX, head, position, position) for position in neighbors]
+            if head_middle is not None and all(m is not None for m in head_neighbors):
+                arm_sh.append(head_middle)
+                arm_sh.extend(head_neighbors)
+        mutations[ARM_SH] = arm_sh
     else:
         mutations[ARM_S] = None
         mutations[ARM_SH] = None

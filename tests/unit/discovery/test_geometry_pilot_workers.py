@@ -24,6 +24,7 @@ from kvcot.discovery.geometry_pilot_workers import (
     _mutation_for,
     _resolve_post_event_vector,
     _resolve_pre_event_vector,
+    _try_mutation_for,
     build_frozen_branch_mutations,
 )
 from kvcot.discovery.capture import UpdateKvCaptureRecord
@@ -369,3 +370,165 @@ def test_noop_arm_candidate_equals_donor_and_is_content_no_op():
     assert noop.candidate_absolute_position == noop.donor_absolute_position == DONOR
     # content must be identical to what's already at the donor's own slot
     assert torch.equal(noop.replacement_key, torch.full((HEAD_DIM,), _post_event_value(ANCHOR_LAYER, ANCHOR_HEAD, DONOR)))
+
+
+# --- partial per-(layer, head) availability (R-KV evicts independently per
+# (layer, kv_head); a live GPU run found that not every head/layer has the
+# candidate resolvable even under the pre/post-event split above -- some
+# heads may have independently evicted it at an EARLIER, untracked event.
+# Every multi-instance arm (H, HL, SH) must exclude an unresolvable
+# (layer, head) combination rather than raise or invent a value.) ---
+
+NUM_KV_HEADS_WIDE = 3
+UNAVAILABLE_HEAD = 2  # neither pre- nor post-event has MIDDLE for this head
+
+
+def _capture_record_partial() -> UpdateKvCaptureRecord:
+    position_map = torch.arange(PRE_SEQ_LEN, dtype=torch.long).unsqueeze(0).expand(NUM_KV_HEADS_WIDE, -1).clone()
+    # UNAVAILABLE_HEAD evicted MIDDLE at some earlier, untracked event --
+    # it is simply absent from this head's pre-event map too.
+    position_map[UNAVAILABLE_HEAD, MIDDLE] = 424242
+    key = torch.zeros(1, NUM_KV_HEADS_WIDE, PRE_SEQ_LEN, HEAD_DIM)
+    value = torch.zeros(1, NUM_KV_HEADS_WIDE, PRE_SEQ_LEN, HEAD_DIM)
+    for head in range(NUM_KV_HEADS_WIDE):
+        for slot in range(PRE_SEQ_LEN):
+            key[0, head, slot, :] = _pre_event_value(head, slot)
+            value[0, head, slot, :] = _pre_event_value(head, slot) + 0.5
+    return UpdateKvCaptureRecord(
+        had_compaction=True,
+        pre_call_key_states=key, pre_call_value_states=value,
+        pre_call_key_shape=tuple(key.shape), pre_call_value_shape=tuple(value.shape),
+        pre_call_dtype="float32", pre_call_device="cpu",
+        recomputed_final_score=None, recomputed_attention_component=None,
+        recomputed_similarity_component=None, recomputed_topk_indices=None,
+        window_size=1, returned_key_states=key, returned_value_states=value,
+        gather_parity_passed=True, pre_event_absolute_position_map=position_map,
+        recomputed_kept_absolute_positions=None, observed_kept_absolute_positions=None,
+        observed_kept_indices_parity_passed=True, parity_check_passed=True, parity_failure_reason=None,
+    )
+
+
+def _snapshot_partial() -> ModelStateSnapshot:
+    keys = [torch.zeros(1, NUM_KV_HEADS_WIDE, POST_SEQ_LEN, HEAD_DIM) for _ in range(NUM_LAYERS)]
+    values = [torch.zeros(1, NUM_KV_HEADS_WIDE, POST_SEQ_LEN, HEAD_DIM) for _ in range(NUM_LAYERS)]
+    layers = {}
+    anchor_head_positions = [0, 1, 2, 3, 4, 6]        # ANCHOR_HEAD: MIDDLE evicted by the anchor event
+    other_head_positions = [0, 1, 2, 4, 5, 6]         # a normal other head: MIDDLE still present
+    unavailable_head_positions = [0, 1, 2, 3, 4, 6]   # UNAVAILABLE_HEAD: MIDDLE absent post-event too
+
+    for layer in range(NUM_LAYERS):
+        positions = torch.zeros(NUM_KV_HEADS_WIDE, POST_SEQ_LEN, dtype=torch.long)
+        if layer == ANCHOR_LAYER:
+            for h in range(NUM_KV_HEADS_WIDE):
+                if h == ANCHOR_HEAD:
+                    positions[h] = torch.tensor(anchor_head_positions)
+                elif h == UNAVAILABLE_HEAD:
+                    positions[h] = torch.tensor(unavailable_head_positions)
+                else:
+                    positions[h] = torch.tensor(other_head_positions)
+        else:
+            positions = torch.arange(POST_SEQ_LEN, dtype=torch.long).unsqueeze(0).expand(NUM_KV_HEADS_WIDE, -1).clone()
+        layers[layer] = LayerProvenance(positions=positions)
+        for h in range(NUM_KV_HEADS_WIDE):
+            for slot in range(POST_SEQ_LEN):
+                keys[layer][0, h, slot, :] = _post_event_value(layer, h, slot)
+                values[layer][0, h, slot, :] = _post_event_value(layer, h, slot) + 0.5
+
+    return ModelStateSnapshot(
+        key_cache=keys, value_cache=values, query_cache={},
+        compression_flags_per_layer=["none"] * NUM_LAYERS,
+        model_length=POST_SEQ_LEN, after_think=None, absolute_position=POST_SEQ_LEN,
+        provenance=ModelProvenance(layers=layers),
+    )
+
+
+def test_try_mutation_for_returns_none_instead_of_raising_when_unavailable():
+    snapshot = _snapshot_partial()
+    record = _capture_record_partial()
+    result = _try_mutation_for(
+        snapshot, capture_record=record, anchor_layer_index=ANCHOR_LAYER,
+        layer_index=ANCHOR_LAYER, kv_head_index=UNAVAILABLE_HEAD,
+        candidate_absolute_position=MIDDLE, donor_absolute_position=DONOR,
+    )
+    assert result is None
+
+
+def test_try_mutation_for_succeeds_for_available_head():
+    snapshot = _snapshot_partial()
+    record = _capture_record_partial()
+    result = _try_mutation_for(
+        snapshot, capture_record=record, anchor_layer_index=ANCHOR_LAYER,
+        layer_index=ANCHOR_LAYER, kv_head_index=ANCHOR_HEAD,
+        candidate_absolute_position=MIDDLE, donor_absolute_position=DONOR,
+    )
+    assert result is not None
+
+
+def test_arm_h_excludes_unavailable_head_includes_the_rest(monkeypatch):
+    import kvcot.discovery.geometry_pilot_manifest as manifest_mod
+
+    monkeypatch.setattr(manifest_mod, "EXPECTED_KV_HEADS", NUM_KV_HEADS_WIDE, raising=False)
+    snapshot = _snapshot_partial()
+    record = _capture_record_partial()
+    layer_set = freeze_layer_set(snapshot, candidate_layers=range(NUM_LAYERS))
+    span_availability = freeze_span_availability(snapshot, record, prompt_length=0, total_length=PRE_SEQ_LEN)
+    mutations = build_frozen_branch_mutations(
+        snapshot, record, num_key_value_heads=NUM_KV_HEADS_WIDE, layer_set=layer_set, span_availability=span_availability,
+    )
+    heads_present = {m.kv_head_index for m in mutations[ARM_H]}
+    assert UNAVAILABLE_HEAD not in heads_present
+    assert heads_present == {h for h in range(NUM_KV_HEADS_WIDE) if h != UNAVAILABLE_HEAD}
+    # never a crash, never an empty result -- at least the anchor head succeeds
+    assert len(mutations[ARM_H]) == NUM_KV_HEADS_WIDE - 1
+
+
+def test_arm_hl_excludes_unavailable_head_per_layer(monkeypatch):
+    import kvcot.discovery.geometry_pilot_manifest as manifest_mod
+
+    monkeypatch.setattr(manifest_mod, "EXPECTED_KV_HEADS", NUM_KV_HEADS_WIDE, raising=False)
+    snapshot = _snapshot_partial()
+    record = _capture_record_partial()
+    layer_set = freeze_layer_set(snapshot, candidate_layers=range(NUM_LAYERS))
+    assert layer_set["available"]
+    span_availability = freeze_span_availability(snapshot, record, prompt_length=0, total_length=PRE_SEQ_LEN)
+    mutations = build_frozen_branch_mutations(
+        snapshot, record, num_key_value_heads=NUM_KV_HEADS_WIDE, layer_set=layer_set, span_availability=span_availability,
+    )
+    # exactly (valid layers) * (all heads) minus any (layer, head) pairs
+    # that genuinely fail to resolve -- never raises, never invents.
+    assert len(mutations[ARM_HL]) > 0
+    for m in mutations[ARM_HL]:
+        assert torch.equal(m.replacement_key, torch.full((HEAD_DIM,), _post_event_value(m.layer_index, m.kv_head_index, MIDDLE)))
+
+
+def test_arm_sh_excludes_head_missing_any_span_position(monkeypatch):
+    import kvcot.discovery.geometry_pilot_manifest as manifest_mod
+
+    monkeypatch.setattr(manifest_mod, "EXPECTED_KV_HEADS", NUM_KV_HEADS_WIDE, raising=False)
+    snapshot = _snapshot_partial()
+    record = _capture_record_partial()
+    span_availability = freeze_span_availability(snapshot, record, prompt_length=0, total_length=PRE_SEQ_LEN)
+    assert span_availability["available"]
+    layer_set = freeze_layer_set(snapshot, candidate_layers=range(NUM_LAYERS))
+    mutations = build_frozen_branch_mutations(
+        snapshot, record, num_key_value_heads=NUM_KV_HEADS_WIDE, layer_set=layer_set, span_availability=span_availability,
+    )
+    heads_present = {m.kv_head_index for m in mutations[ARM_SH]}
+    assert UNAVAILABLE_HEAD not in heads_present
+    # each included head must contribute exactly 3 mutations (middle + 2 neighbors) -- never a partial span for a head.
+    assert len(mutations[ARM_SH]) % 3 == 0
+    assert len(mutations[ARM_SH]) == 3 * len(heads_present)
+
+
+def test_arm_c1_still_raises_when_its_single_anchor_pair_is_unavailable():
+    # C1 is not best-effort -- it is the single, already-frozen pair
+    # already causally tested in the immutable R2 evidence, so a failure
+    # here must be a hard error, not a silent empty result.
+    snapshot = _snapshot_partial()
+    record = _capture_record_partial()
+    with pytest.raises(GeometryWorkerError, match="not resolvable"):
+        _mutation_for(
+            snapshot, capture_record=record, anchor_layer_index=ANCHOR_LAYER,
+            layer_index=ANCHOR_LAYER, kv_head_index=UNAVAILABLE_HEAD,
+            candidate_absolute_position=MIDDLE, donor_absolute_position=DONOR,
+        )
