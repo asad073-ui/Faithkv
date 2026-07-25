@@ -1,5 +1,39 @@
 # Changelog
 
+## 2026-07-25 - B2A-R3 Stage-C R2 result acceptance (NO GPU; NO CODE CHANGE)
+
+The single authorized Stage-C R2 execution (`stage-c-2026-07-24-r2`,
+attempt `73cb2b597b83449eb0d990fcab2741b6`, execution SHA
+`0673bbeba25a9b7a6d6e0a78b8a391f36d43f216`) completed with exit code 0.
+Both wired gate tuples passed with zero failed conditions: legacy
+`MANDATORY_GATE_CONDITIONS` (29 conditions) and final
+`FINAL_MANDATORY_GATE_CONDITIONS` (30 conditions). Those gates are
+mechanical -- execution integrity, evidence integrity, and resource limits.
+Neither contains a mechanism-success condition.
+
+The frozen scientific mechanism criterion
+(`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` section 17: at
+least 4 of 12 real pairs with `swap_gain > 0.01` nats, AND
+`abs(spearman) < 0.30`, AND an exact no-op control) was active at R2 and
+was never superseded. It **failed**: 0 of 12 pairs cleared 0.01 nats
+(maximum observed gain 0.0010573618851692501, 9.46x below threshold; mean
+-0.00046982425755099977; 7 of 12 gains negative). Conditions B and C
+passed.
+
+No code, threshold, comparator, sample-count requirement, or scientific
+primitive is changed by this acceptance. Section 17 documented its own
+non-wiring in the same paragraph that froze its thresholds, so the
+implementation is faithful and no repair is warranted; wiring the criterion
+now, after observing a failing result, would be a prohibited post-hoc gate
+change.
+
+Accepted classification: STAGE-C EXECUTION VALID -- FROZEN MECHANISM GATE
+FAILED; B2B BLOCKED. Full detail in
+`docs/B2A_R3_STAGE_C_R2_RESULT_ACCEPTANCE_2026-07-25.md`; the follow-up
+design (not an authorization) is
+`docs/B2A_R3_POST_STAGE_C_MINIMAL_DIAGNOSTIC_PILOT_PLAN_2026-07-25.md`.
+No frozen setting in `configs/lock.yaml` changed.
+
 ## 2026-07-24 - B2A-R3 Stage-C R1 provenance-collector repair authorization (AUTHORIZATION ONLY; NO GPU)
 
 Authorization ID `stage-c-2026-07-24-r1` was consumed by the first real

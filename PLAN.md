@@ -1330,6 +1330,27 @@ remains retired.
    retired GSM8K b128 operating point is not re-run, and Phase C does not
    begin before a design phase addressing the A3 verdict is complete.
 
+
+## B2B path status (2026-07-25) -- STOPPED
+
+B2B is **blocked** and its path is stopped here. The B2A-R3 Stage-C R2
+calibration executed cleanly (exit code 0, both mechanical gate tuples
+passed, zero attrition) but the frozen scientific mechanism criterion
+(protocol section 17) **failed**: 0 of 12 real pairs reached the frozen
+`swap_gain > 0.01` nat threshold against a required 4, with a negative mean
+gain. Protocol section 18's kill gate (gains at floor) therefore applies,
+and the R2 authorization document itself states "Stage C only: no B2B".
+
+Do not schedule, design toward, or authorize B2B on the strength of the
+mechanical pass. A mechanical pass does not imply scientific success --
+protocol section 17 says so in advance, and this is the case it anticipated.
+
+The only sanctioned next step is the CPU-designed, not-yet-authorized
+minimal diagnostic pilot in
+`docs/B2A_R3_POST_STAGE_C_MINIMAL_DIAGNOSTIC_PILOT_PLAN_2026-07-25.md`,
+whose own predeclared kill criterion may close the single-token-KV-restore
+line entirely.
+
 ## Open decisions needing human input
 
 - **License.** Not chosen. See `README.md`.
