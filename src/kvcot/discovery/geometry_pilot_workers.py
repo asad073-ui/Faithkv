@@ -313,7 +313,7 @@ def capture_geometry_anchor(
         build_real_prefill_fn,
         build_real_snapshot_fn,
     )
-    from kvcot.generation.provenance import ModelProvenance
+    from kvcot.generation.provenance import LayerProvenance, ModelProvenance
     from kvcot.generation.replay import CompactionTracker
     from kvcot.generation.state import reset_patched_state
 
@@ -350,20 +350,34 @@ def capture_geometry_anchor(
         tokenizer_snapshot = resolve_local_snapshot(config.model.tokenizer_name, config.model.tokenizer_revision, "tokenizer")
         model = load_rkv_discovery_model(config, model_snapshot.local_path, tokenizer_snapshot.local_path, _device)
 
-    num_hidden_layers = len(model.model.layers) if _load_model is None else config.model.num_hidden_layers
-    num_key_value_heads = config.model.num_key_value_heads
+    # `DiscoveryModelLock` (the static YAML config-lock) does not encode
+    # architecture internals (layer/head counts) -- those are resolved
+    # from the LOADED model's own HF config, exactly like the real-model
+    # worker path already does for the model/tokenizer revision strings.
+    num_hidden_layers = len(model.model.layers)
+    num_key_value_heads = model.config.num_key_value_heads
+
+    from transformers.cache_utils import DynamicCache
 
     def fresh_state() -> RealModelState:
-        cache = reset_patched_state(model)
+        cache = reset_patched_state(model, lambda: DynamicCache())
+        provenance = ModelProvenance(
+            layers={i: LayerProvenance.empty(num_key_value_heads) for i in range(num_hidden_layers)}
+        )
         return RealModelState(
-            model=model, cache=cache, model_provenance=ModelProvenance(),
+            model=model, cache=cache, model_provenance=provenance,
             compaction=CompactionTracker(), absolute_position=0, device=_device,
         )
 
     prefill_fn = build_real_prefill_fn(_device)
     decode_one_fn = build_real_decode_one_fn(_device)
     snapshot_fn = build_real_snapshot_fn()
-    branch_step_fn = build_real_branch_step_fn_restore_once(_device)
+    # consume_owned_snapshot=True: every branch snapshot
+    # `build_geometry_branch_record` builds is a disposable, independently-
+    # owned clone used exactly once (baseline, then swapped) and never
+    # reused afterward -- the identical pattern `run_rkv_worker` uses for
+    # its own per-pair baseline/swapped clones.
+    branch_step_fn = build_real_branch_step_fn_restore_once(model, _device, consume_owned_snapshot=True)
 
     provenance = NaturalRunProvenance(
         model_name=config.model.name, model_revision=config.model.revision,
@@ -371,11 +385,11 @@ def capture_geometry_anchor(
         rkv_revision=config.rkv.upstream_revision, config_sha256=manifest.config_sha256 if hasattr(manifest, "config_sha256") else "",
         dataset_name=config.dataset.name, example_id=manifest.unique_id,
     )
-    answer_fn = build_math500_answer_fn(manifest.gold_answer)
+    answer_fn = build_math500_answer_fn(tokenizer, manifest.gold_answer)
 
     trace = run_natural_pass1(
         provenance, manifest.prompt_token_ids, fresh_state(), prefill_fn, decode_one_fn,
-        config.generation.base_max_new_tokens, tokenizer.eos_token_id, answer_fn,
+        config.generation.max_new_tokens, tokenizer.eos_token_id, answer_fn,
     )
     if trace.natural_answer_status != "correct":
         raise GeometryWorkerError(f"natural run answer status is {trace.natural_answer_status!r}, expected 'correct'")
