@@ -3175,6 +3175,54 @@ def cmd_run_b2a_r3_stage_c(args: argparse.Namespace) -> int:
         return 2
 
 
+def cmd_run_8b_geometry_pilot(args: argparse.Namespace) -> int:
+    if args.dry_run and args.execute:
+        raise SystemExit("run-8b-geometry-pilot: pass exactly one of --dry-run or --execute, not both.")
+    if not args.dry_run and not args.execute:
+        raise SystemExit("run-8b-geometry-pilot: pass exactly one of --dry-run or --execute.")
+
+    from kvcot.discovery.discovery_config import load_discovery_config
+    from kvcot.discovery.manifest import load_b2a_one_example_manifest
+    from kvcot.discovery.geometry_pilot_authorization import (
+        GeometryAuthorizationAlreadyConsumed,
+        GeometryAuthorizationError,
+        load_binding_from_json,
+    )
+    from kvcot.discovery.geometry_pilot_contract import BASE_SHA, REPOSITORY, BRANCH
+    from kvcot.discovery.geometry_pilot_execute import run_dry_run, run_execute
+
+    binding_path = f"{args.authorization_document}.binding.json"
+    binding = load_binding_from_json(binding_path)
+
+    try:
+        if args.dry_run:
+            plan = run_dry_run(repository_root=".", binding=binding)
+            print("run-8b-geometry-pilot dry-run plan:")
+            for key, value in plan.items():
+                print(f"  {key} = {value}")
+            return 0
+
+        config = load_discovery_config("configs/discovery/llama8b_math500_b1024.yaml")
+        manifest = load_b2a_one_example_manifest()
+        result = run_execute(
+            repository_root=".",
+            binding=binding,
+            config=config,
+            manifest=manifest,
+            authorized_repository=REPOSITORY,
+            authorized_branch=BRANCH,
+            observed_execution_commit_sha=git_commit("."),
+        )
+        print("run-8b-geometry-pilot execute result:")
+        print(f"  attempt_id = {result['attempt_id']}")
+        print(f"  attempt_directory = {result['attempt_directory']}")
+        print(f"  classification_letter = {result['scientific_summary']['classification_letter']}")
+        return 0
+    except (GeometryAuthorizationError, GeometryAuthorizationAlreadyConsumed) as exc:
+        print(f"run-8b-geometry-pilot: REFUSED: {exc}", file=sys.stderr)
+        return 2
+
+
 def cmd_prepare_post_stage_c_diagnostic_pilot(args: argparse.Namespace) -> int:
     from kvcot.discovery.diagnostic_pilot_prepare import prepare_runtime_inputs
 
@@ -3441,6 +3489,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--execute", action="store_true")
     p.set_defaults(func=cmd_run_b2a_r3_stage_c)
+
+    p = sub.add_parser(
+        "run-8b-geometry-pilot",
+        help="8B structured restoration geometry pilot: fixed-path dry-run or one-use authorized execution.",
+    )
+    p.add_argument("--authorization-document", required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--execute", action="store_true")
+    p.set_defaults(func=cmd_run_8b_geometry_pilot)
 
     p = sub.add_parser(
         "prepare-post-stage-c-diagnostic-pilot",
