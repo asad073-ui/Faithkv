@@ -17,10 +17,10 @@ measurement was taken.
 
 | Observation | Value | Why it matters |
 |---|---|---|
-| Peak per-token \|ΔNLL\| | 5.7e-2 to 6.4e-2 nats (layers 6, 16) | The intervention **does** perturb the model substantially — ~41–46% of the 0.1394-nat mean baseline NLL |
+| Peak per-token \|ΔNLL\| | per-layer mean of per-pair peaks 5.7e-2 to 6.4e-2 nats (layers 6, 16); single-pair maximum 7.28e-2 | The intervention **does** perturb the model substantially — the largest single-token effect is ~52% of the 0.1394-nat mean baseline NLL |
 | Window-mean gain | −4.7e-4 | Those large local effects **cancel** when averaged over 48 tokens |
 | Sign split | 5 positive / 7 negative | Direction is essentially random w.r.t. "restoring the evicted token helps" |
-| Tokens with \|Δ\| > 1e-9 | 37 of 48 | The perturbation propagates broadly, it does not decay quietly |
+| Tokens with \|Δ\| > 1e-9 | 17–38 of 48 across the 12 pairs | The perturbation propagates broadly, it does not decay quietly |
 | Narrowing the window | 0/12 above 0.01 at **every** 8-token slice; first-token-only max is **negative** (−2.4e-7) | A shorter scoring window does **not** rescue the result |
 | `score_margin_e_minus_r` | −1.1e-5 to −1.5e-4 | The selection score barely separates evicted from retained tokens |
 | abs(Spearman rho) | 0.2777 | Deployable signals do not predict gain |
@@ -170,6 +170,18 @@ new number is invented after seeing data.
 | Both move | Both contribute; measure interaction before any method design |
 | **Neither moves** | **Mechanism dead at this operating point — the most likely outcome given R2** |
 | Only C moves | NLL was the wrong readout; revisit the metric before anything else |
+
+### Model-scale caveat (stated explicitly, not buried)
+
+R2 ran on `DeepSeek-R1-Distill-Llama-8B`. Arms A–C above are specified on
+the 1.5B primary-pipeline model because it is the cheapest way to
+*discriminate among mechanisms*. That is a deliberate deviation from R2's
+operating point, and it has a hard consequence: **a 1.5B result can neither
+confirm nor refute the 8B R2 null.** It can only tell us which mechanism to
+interrogate. Any claim about the R2 operating point itself requires an 8B
+arm, costed separately. The "no change to model" line below means no model
+substitution *within* the frozen primary pipeline or *within* an arm — it
+does not license reading a 1.5B outcome as an 8B conclusion.
 
 ### Explicitly out of scope
 No B2B. No 12-example run. No method implementation. No faithfulness-aware

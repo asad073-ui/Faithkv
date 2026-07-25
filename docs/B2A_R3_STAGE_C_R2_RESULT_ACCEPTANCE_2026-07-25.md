@@ -71,9 +71,10 @@ not copied from the summary. Discrepancy count against `pair_records.json`,
 | No-op control | NLL arrays element-wise exactly equal; `swap_gain = 0.0` |
 
 Context: mean baseline NLL over the scored window is 0.1394 nats, so the
-`0.01`-nat threshold is 7.18% of baseline. The largest observed gain is
-1.41% of baseline — **9.46× below** the threshold. Seven of twelve gains are
-negative.
+`0.01`-nat threshold is 7.18% of baseline. The largest observed **positive**
+gain is 0.76% of baseline — **9.46× below** the threshold. (The largest
+gain in either direction, 0.00196, is 1.41% of baseline and is *negative*.)
+Seven of twelve gains are negative.
 
 ---
 
