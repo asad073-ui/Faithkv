@@ -3211,7 +3211,7 @@ def cmd_run_8b_geometry_pilot(args: argparse.Namespace) -> int:
             manifest=manifest,
             authorized_repository=REPOSITORY,
             authorized_branch=BRANCH,
-            observed_execution_commit_sha=git_commit("."),
+            observed_execution_commit_sha=git_commit(),
         )
         print("run-8b-geometry-pilot execute result:")
         print(f"  attempt_id = {result['attempt_id']}")
