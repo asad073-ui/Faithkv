@@ -3175,6 +3175,66 @@ def cmd_run_b2a_r3_stage_c(args: argparse.Namespace) -> int:
         return 2
 
 
+def cmd_prepare_post_stage_c_diagnostic_pilot(args: argparse.Namespace) -> int:
+    from kvcot.discovery.diagnostic_pilot_prepare import prepare_runtime_inputs
+
+    try:
+        result = prepare_runtime_inputs(repository_root=".", runtime_root=args.runtime_root)
+    except Exception as exc:  # noqa: BLE001
+        print(f"prepare-post-stage-c-diagnostic-pilot: REFUSED: {exc}", file=sys.stderr)
+        return 2
+    print("prepare-post-stage-c-diagnostic-pilot result:")
+    for key, value in result.items():
+        print(f"  {key} = {value}")
+    return 0
+
+
+def cmd_verify_post_stage_c_diagnostic_pilot(args: argparse.Namespace) -> int:
+    try:
+        if args.attempt:
+            from kvcot.discovery.diagnostic_pilot_execute import verify_attempt
+
+            result = verify_attempt(args.attempt)
+        else:
+            from kvcot.discovery.diagnostic_pilot_prepare import verify_runtime_inputs
+
+            result = verify_runtime_inputs(args.runtime_config)
+    except Exception as exc:  # noqa: BLE001
+        print(f"verify-post-stage-c-diagnostic-pilot: VERIFICATION FAILED: {exc}", file=sys.stderr)
+        return 2
+    print("verify-post-stage-c-diagnostic-pilot: verification PASSED")
+    print(result)
+    return 0
+
+
+def cmd_run_post_stage_c_diagnostic_pilot(args: argparse.Namespace) -> int:
+    if args.dry_run == args.execute:
+        raise SystemExit(
+            "run-post-stage-c-diagnostic-pilot: pass exactly one of --dry-run or --execute"
+        )
+    try:
+        if args.dry_run:
+            from kvcot.discovery.diagnostic_pilot_execute import dry_run_diagnostic_pilot
+
+            result = dry_run_diagnostic_pilot(
+                repository_root=".", authorization_document=args.authorization_document
+            )
+            print("run-post-stage-c-diagnostic-pilot dry-run preflight:")
+        else:
+            from kvcot.discovery.diagnostic_pilot_execute import run_diagnostic_pilot
+
+            result = run_diagnostic_pilot(
+                repository_root=".", authorization_document=args.authorization_document
+            )
+            print("run-post-stage-c-diagnostic-pilot execute result:")
+        for key, value in result.items():
+            print(f"  {key} = {value}")
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        print(f"run-post-stage-c-diagnostic-pilot: REFUSED: {exc}", file=sys.stderr)
+        return 2
+
+
 # ----------------------------------------------------------------------------- main
 
 def build_parser() -> argparse.ArgumentParser:
@@ -3375,6 +3435,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--execute", action="store_true")
     p.set_defaults(func=cmd_run_b2a_r3_stage_c)
+
+    p = sub.add_parser(
+        "prepare-post-stage-c-diagnostic-pilot",
+        help="Prepare pinned CPU-only runtime inputs for the post-Stage-C diagnostic pilot.",
+    )
+    p.add_argument(
+        "--runtime-root",
+        default="/workspace/faithkv-post-stage-c-diagnostic-runtime",
+    )
+    p.set_defaults(func=cmd_prepare_post_stage_c_diagnostic_pilot)
+
+    p = sub.add_parser(
+        "verify-post-stage-c-diagnostic-pilot",
+        help="Verify frozen diagnostic runtime inputs or reconstruct a completed attempt.",
+    )
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument("--runtime-config")
+    group.add_argument("--attempt")
+    p.set_defaults(func=cmd_verify_post_stage_c_diagnostic_pilot)
+
+    p = sub.add_parser(
+        "run-post-stage-c-diagnostic-pilot",
+        help="Non-consuming dry-run or one-use authorized post-Stage-C diagnostic execution.",
+    )
+    p.add_argument("--authorization-document", required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--execute", action="store_true")
+    p.set_defaults(func=cmd_run_post_stage_c_diagnostic_pilot)
 
     return parser
 

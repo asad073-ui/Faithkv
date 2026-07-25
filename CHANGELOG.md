@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-07-25 — post-Stage-C diagnostic-pilot protocol and CPU harness
+
+- Corrected the invalid four-KV-head arm for Qwen 1.5B to widths one and
+  exactly two, without touching the immutable R2 threshold or verdict.
+- Replaced hindsight/oracle selection language with a frozen bounded causal
+  candidate sweep of at most four deployable-score-ordered candidates.
+- Added outcome-blind first-three qualification, one event per example,
+  exact pinned model/tokenizer/dataset/R-KV identities, and a predeclared
+  behavioral sign-change criterion.
+- Added an isolated diagnostic namespace, strict same-layer restore primitive,
+  separate worker processes, atomic one-use claim, non-consuming dry-run,
+  immutable evidence artifacts, independent reconstruction, and CPU tests.
+- No Stage-C code/evidence/claim/attempt changed; no GPU run, B2B run, model
+  weights, claim, or attempt artifact is committed by this entry.
+
 ## 2026-07-25 - B2A-R3 Stage-C R2 result acceptance (NO GPU; NO CODE CHANGE)
 
 The single authorized Stage-C R2 execution (`stage-c-2026-07-24-r2`,

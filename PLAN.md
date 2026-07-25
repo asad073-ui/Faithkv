@@ -1,5 +1,21 @@
 # Plan and status
 
+## 2026-07-25 — post-Stage-C diagnostic pilot implementation
+
+The immutable R2 result remains accepted with its mechanism gate failed and
+B2B blocked. A separate branch now contains a corrected, CPU-authorized
+diagnostic-pilot harness for the Qwen 1.5B operating point. The design uses
+exactly two KV heads, a bounded causal candidate sweep, one event in each of
+at most three mechanically qualified examples, unchanged strict 0.01-nat
+gain threshold, and a predeclared answer-margin sign-change readout.
+
+Current state: implementation and local CPU validation are complete (40
+diagnostic tests plus 1,960 passing repository `not gpu` tests; four existing
+snapshot-dependent skips and 14 GPU deselections). No GPU authorization or
+diagnostic claim exists, no model inference has been run by this work, and no
+B2B action is authorized. Exact-SHA CPU CI and an independent implementation
+audit are required before a one-use execution authorization may be authored.
+
 ## Current status: B2A-R3 Stage-C R1 provenance-collector repair authorized; implementation pending (2026-07-24)
 
 The first real Stage-C execution attempt (authorization
