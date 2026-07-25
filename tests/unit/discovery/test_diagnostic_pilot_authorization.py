@@ -19,6 +19,7 @@ from kvcot.discovery.diagnostic_pilot_authorization import (
 from kvcot.discovery.diagnostic_pilot_contract import (
     BRANCH,
     CANDIDATE_MANIFEST_CANONICAL_SHA256,
+    GENERATIONS,
     MODEL_REVISION,
     R1_GENERATION,
     R2_GENERATION,
@@ -26,6 +27,9 @@ from kvcot.discovery.diagnostic_pilot_contract import (
     RKV_REVISION,
     TOKENIZER_REVISION,
     attach_canonical_hash,
+    execution_command_document_argument,
+    generation_for_authorization_document,
+    verify_canonical_hash,
 )
 
 
@@ -92,20 +96,69 @@ def authorization(tmp_path):
     return parse_authorization_document(document), claim
 
 
-def test_consumed_r1_authorization_document_still_parses():
-    """The consumed R1 authorization stays parseable forever."""
-    parsed = parse_authorization_document(
-        REPOSITORY_ROOT / R1_GENERATION.authorization_document_path
-    )
-    assert parsed.generation is R1_GENERATION
-    assert parsed.payload["authorization_id"] == (
-        "post-stage-c-diagnostic-pilot-2026-07-25-one-use"
-    )
-    assert parsed.payload["exact_command"] == R1_GENERATION.exact_execution_command
-    assert parsed.payload["maximum_interventions_per_selected_example"] == 6
-    assert parsed.payload["canonical_sha256"] == (
+def committed_payload(relative_path):
+    """The JSON payload of a committed authorization document."""
+    text = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+    raw = text.split(AUTHORIZATION_JSON_BEGIN, 1)[1].split(AUTHORIZATION_JSON_END, 1)[0]
+    return json.loads(raw.strip())
+
+
+def test_consumed_r1_authorization_document_is_unchanged_and_still_resolves():
+    """The consumed R1 authorization stays intact and R1-resolvable.
+
+    Its bound implementation audit lives outside the repository, so the
+    full audit-binding parse is a host gate; everything the repair could
+    have broken is checked here from the committed bytes alone.
+    """
+    payload = committed_payload(R1_GENERATION.authorization_document_path)
+    verify_canonical_hash(payload)
+    assert payload["canonical_sha256"] == (
         "780ba2db1d7d77ce7d7c940b43c0813add5df8585effbc4d4d1ca061a6445bf8"
     )
+    assert payload["authorization_id"] == (
+        "post-stage-c-diagnostic-pilot-2026-07-25-one-use"
+    )
+    assert payload["exact_command"] == R1_GENERATION.exact_execution_command
+    assert payload["maximum_interventions_per_selected_example"] == 6
+    assert payload["output_root"] == R1_GENERATION.default_output_root
+    # The document resolves to R1, and its own command names it.
+    assert (
+        generation_for_authorization_document(
+            REPOSITORY_ROOT / R1_GENERATION.authorization_document_path
+        )
+        is R1_GENERATION
+    )
+    assert (
+        execution_command_document_argument(payload["exact_command"])
+        == R1_GENERATION.authorization_document_path
+    )
+
+
+def test_committed_r1_authorization_payload_still_parses_end_to_end(tmp_path):
+    """Re-parse the committed R1 payload against a local audit file.
+
+    Only the two host-path bindings are redirected into `tmp_path`; every
+    frozen scientific and governance field is the committed one.
+    """
+    payload = committed_payload(R1_GENERATION.authorization_document_path)
+    audit = tmp_path / "implementation-audit.md"
+    audit.write_text("PASS synthetic stand-in for the host audit\n", encoding="utf-8")
+    payload["implementation_audit_path"] = str(audit)
+    payload["implementation_audit_sha256"] = sha256_file(audit)
+    payload["claim_path"] = str(tmp_path / "claim.json")
+    payload["output_root"] = str(tmp_path / "execution")
+    payload["runtime_config_path"] = str(tmp_path / "runtime.json")
+    document = tmp_path / R1_GENERATION.authorization_document_path
+    document.parent.mkdir(parents=True, exist_ok=True)
+    document.write_text(
+        f"{AUTHORIZATION_JSON_BEGIN}\n{json.dumps(attach_canonical_hash(payload))}\n"
+        f"{AUTHORIZATION_JSON_END}\n",
+        encoding="utf-8",
+    )
+    parsed = parse_authorization_document(document)
+    assert parsed.generation is R1_GENERATION
+    assert parsed.payload["maximum_interventions_per_selected_example"] == 6
+    assert parsed.payload["exact_command"] == R1_GENERATION.exact_execution_command
 
 
 def test_r2_authorization_shape_parses(tmp_path):
@@ -205,14 +258,11 @@ def test_r1_generation_attempt_verification_remains_reachable():
     """
     from kvcot.discovery.diagnostic_pilot_execute import EXECUTING_GENERATION
 
-    parsed = parse_authorization_document(
-        REPOSITORY_ROOT / R1_GENERATION.authorization_document_path
-    )
-    assert parsed.generation is R1_GENERATION
+    payload = committed_payload(R1_GENERATION.authorization_document_path)
     assert EXECUTING_GENERATION is not R1_GENERATION
-    assert Path(parsed.payload["output_root"]) == Path(
-        R1_GENERATION.default_output_root
-    )
+    assert Path(payload["output_root"]) == Path(R1_GENERATION.default_output_root)
+    # R1 evidence is verifiable but never executable again.
+    assert R1_GENERATION in GENERATIONS
 
 
 def test_claim_consumption_is_atomic_and_permanently_prohibits_retry(tmp_path):

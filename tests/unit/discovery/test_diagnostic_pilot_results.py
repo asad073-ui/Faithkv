@@ -608,6 +608,7 @@ def test_dry_run_is_non_consuming_and_requests_no_cuda_or_weights(tmp_path, monk
             "protocol_document_sha256": sha256_file(
                 repository / R2_GENERATION.protocol_document_path
             ),
+            "implementation_sha": "a" * 40,
             "config_byte_sha256": sha256_file(repository / CONFIG_PATH),
             "model_snapshot_path": "/exact/model",
             "tokenizer_snapshot_path": "/exact/tokenizer",

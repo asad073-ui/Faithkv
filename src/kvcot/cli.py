@@ -3184,6 +3184,7 @@ def cmd_prepare_post_stage_c_diagnostic_pilot(args: argparse.Namespace) -> int:
             runtime_root=args.runtime_root,
             output_root=args.output_root,
             generation=args.generation,
+            implementation_sha=args.implementation_sha,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"prepare-post-stage-c-diagnostic-pilot: REFUSED: {exc}", file=sys.stderr)
@@ -3459,6 +3460,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="r1",
         choices=("r1", "r2"),
         help="Diagnostic-pilot generation whose protocol document and pair budget are bound.",
+    )
+    p.add_argument(
+        "--implementation-sha",
+        default=None,
+        help="Exact audited implementation commit SHA the runtime artifact binds.",
     )
     p.set_defaults(func=cmd_prepare_post_stage_c_diagnostic_pilot)
 

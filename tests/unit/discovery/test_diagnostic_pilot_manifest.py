@@ -2,6 +2,8 @@ import pytest
 
 from kvcot.discovery.diagnostic_pilot_contract import (
     MAXIMUM_QUALIFICATION_CANDIDATES,
+    R1_GENERATION,
+    R2_GENERATION,
     TOKENIZER_REPOSITORY,
     TOKENIZER_REVISION,
 )
@@ -15,6 +17,8 @@ from kvcot.discovery.diagnostic_pilot_manifest import (
 )
 from kvcot.discovery.diagnostic_pilot_prepare import (
     DiagnosticPreparationRefused,
+    _implementation_sha_fields,
+    _pair_budget_fields,
     _verify_candidate_prompt_bindings,
 )
 
@@ -229,3 +233,27 @@ def test_external_prompt_artifact_must_equal_frozen_manifest_reconstruction():
     prompts["manifests"][0]["prompt_token_ids"] = [999]
     with pytest.raises(DiagnosticPreparationRefused, match="frozen manifest/tokenizer"):
         _verify_candidate_prompt_bindings(prompts, manifests)
+
+
+def test_runtime_preparation_binds_generation_specific_identity():
+    """R2 must bind an exact implementation SHA; R1 must not gain one."""
+    assert _implementation_sha_fields(R2_GENERATION, "a" * 40) == {
+        "implementation_sha": "a" * 40
+    }
+    assert _implementation_sha_fields(R1_GENERATION, None) == {}
+    with pytest.raises(DiagnosticPreparationRefused, match="does not bind"):
+        _implementation_sha_fields(R1_GENERATION, "a" * 40)
+    for bad in (None, "", "A" * 40, "a" * 39, "main", 40):
+        with pytest.raises(DiagnosticPreparationRefused, match="implementation SHA"):
+            _implementation_sha_fields(R2_GENERATION, bad)
+
+
+def test_runtime_pair_budget_vocabulary_is_generation_specific():
+    assert _pair_budget_fields(R1_GENERATION) == {
+        "maximum_interventions_per_selected_example": 6,
+        "maximum_total_interventions": 18,
+    }
+    assert _pair_budget_fields(R2_GENERATION) == {
+        "maximum_pairs_per_selected_example": 9,
+        "maximum_total_pairs": 27,
+    }

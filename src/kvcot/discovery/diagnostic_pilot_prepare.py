@@ -7,6 +7,7 @@ from typing import Any
 
 from kvcot.discovery.attempt_artifacts import atomic_write_json, sha256_file
 from kvcot.discovery.diagnostic_pilot_contract import (
+    _HEX40,
     BRANCH,
     CANDIDATE_MANIFEST_BYTE_SHA256,
     CANDIDATE_MANIFEST_CANONICAL_SHA256,
@@ -151,12 +152,35 @@ def _pair_budget_fields(generation: DiagnosticGeneration) -> dict[str, Any]:
     }
 
 
+def _implementation_sha_fields(
+    generation: DiagnosticGeneration, implementation_sha: str | None
+) -> dict[str, Any]:
+    """Bind the audited implementation commit into the runtime artifact.
+
+    R1's artifact predates this binding and is left byte-identical; every
+    later generation must name the exact implementation SHA it was
+    prepared against so preflight can compare it with the authorization.
+    """
+    if generation is R1_GENERATION:
+        if implementation_sha is not None:
+            raise DiagnosticPreparationRefused(
+                "the R1 runtime artifact does not bind an implementation SHA"
+            )
+        return {}
+    if not isinstance(implementation_sha, str) or _HEX40.fullmatch(implementation_sha) is None:
+        raise DiagnosticPreparationRefused(
+            "implementation SHA must be an exact 40-character lowercase commit SHA"
+        )
+    return {"implementation_sha": implementation_sha}
+
+
 def prepare_runtime_inputs(
     *,
     repository_root: str | Path,
     runtime_root: str | Path = DEFAULT_RUNTIME_ROOT,
     output_root: str | Path = DEFAULT_OUTPUT_ROOT,
     generation: str = R1_GENERATION.label,
+    implementation_sha: str | None = None,
 ) -> dict[str, Any]:
     """Prepare prompt identities and runtime binding without loading weights.
 
@@ -171,6 +195,7 @@ def prepare_runtime_inputs(
         raise DiagnosticPreparationRefused("output root must be an absolute path")
     output_root = output_root.resolve()
     pilot_generation = generation_by_label(generation)
+    implementation_sha_fields = _implementation_sha_fields(pilot_generation, implementation_sha)
     if runtime_root == output_root:
         raise DiagnosticPreparationRefused("runtime root and output root must differ")
     candidate_manifest = _load_candidate_manifest(repository_root)
@@ -220,6 +245,7 @@ def prepare_runtime_inputs(
             "protocol_document_sha256": sha256_file(
                 repository_root / pilot_generation.protocol_document_path
             ),
+            **implementation_sha_fields,
             "config_path": CONFIG_PATH,
             "config_byte_sha256": sha256_file(config_path),
             "config_canonical_sha256": canonical_config_hash(config),
@@ -275,6 +301,7 @@ def prepare_runtime_inputs(
         "model_snapshot_path": model_snapshot.local_path,
         "tokenizer_snapshot_path": tokenizer_snapshot.local_path,
         "protocol_document_path": pilot_generation.protocol_document_path,
+        "implementation_sha": implementation_sha,
         "output_root": str(output_root),
         "maximum_pairs_per_selected_example": (
             pilot_generation.maximum_pairs_per_selected_example
@@ -309,6 +336,17 @@ def verify_runtime_inputs(
         raise DiagnosticPreparationRefused("runtime-config output root must be an absolute path")
     if Path(output_root).resolve() != Path(output_root):
         raise DiagnosticPreparationRefused("runtime-config output root must be canonical")
+    if pilot_generation is not R1_GENERATION:
+        bound_sha = payload.get("implementation_sha")
+        if not isinstance(bound_sha, str) or _HEX40.fullmatch(bound_sha) is None:
+            raise DiagnosticPreparationRefused(
+                "runtime-config implementation SHA must be an exact 40-character "
+                "lowercase commit SHA"
+            )
+    elif "implementation_sha" in payload:
+        raise DiagnosticPreparationRefused(
+            "the R1 runtime artifact does not bind an implementation SHA"
+        )
     expected = {
         "repository": "asad073-ui/Faithkv",
         "branch": BRANCH,

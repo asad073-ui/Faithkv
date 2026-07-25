@@ -91,6 +91,10 @@ def _preflight(repository_root: Path, authorization: Any) -> dict[str, Any]:
         raise DiagnosticExecutionRefused(
             "runtime protocol document belongs to a different diagnostic-pilot generation"
         )
+    if runtime.get("implementation_sha") != payload["authorized_implementation_sha"]:
+        raise DiagnosticExecutionRefused(
+            "runtime binding was prepared against a different implementation SHA"
+        )
     head = _git(repository_root, "rev-parse", "HEAD")
     remote_head = _git(repository_root, "rev-parse", f"origin/{BRANCH}")
     branch = _git(repository_root, "branch", "--show-current")
