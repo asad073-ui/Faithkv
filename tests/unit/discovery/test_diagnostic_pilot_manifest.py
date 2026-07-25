@@ -10,6 +10,7 @@ from kvcot.discovery.diagnostic_pilot_manifest import (
     bounded_candidate_upper_bound,
     choose_event_by_deployable_score,
     freeze_candidate_pool,
+    mechanically_qualifies,
     select_first_three_qualified,
 )
 from kvcot.discovery.diagnostic_pilot_prepare import (
@@ -33,6 +34,102 @@ def qualified_row(ordinal, **updates):
     }
     row.update(updates)
     return row
+
+
+def zero_event_row(ordinal, **updates):
+    """The exact shape of R1's candidate 1: legitimately unqualified."""
+    row = qualified_row(
+        ordinal,
+        eligible_event_exists=False,
+        selected_event_has_two_candidates=False,
+        selected_event_count=0,
+    )
+    row.update(updates)
+    return row
+
+
+def test_production_zero_event_row_is_an_ordinary_non_qualifier():
+    # This is byte-for-byte the row that raised
+    # `ValueError: qualification requires exactly one selected event`
+    # in the consumed R1 run and voided it before any intervention.
+    row = {
+        "candidate_ordinal": 1,
+        "fullkv_execution_valid": True,
+        "rkv_replay_mechanically_valid": False,
+        "correctness_status_matched": True,
+        "meaningful_compression": True,
+        "eligible_event_exists": False,
+        "selected_event_has_two_candidates": False,
+        "selected_event_count": 0,
+        "intervention_not_evaluated": True,
+    }
+    assert mechanically_qualifies(row) is False
+
+
+def test_zero_event_row_does_not_stop_the_selection_scan():
+    rows = [
+        qualified_row(0, meaningful_compression=False),
+        zero_event_row(1),
+        qualified_row(2),
+        qualified_row(3),
+        qualified_row(4),
+    ]
+    assert [row["candidate_ordinal"] for row in select_first_three_qualified(rows)] == [
+        2,
+        3,
+        4,
+    ]
+
+
+def test_eight_zero_event_rows_complete_the_scan_with_zero_selections():
+    rows = [zero_event_row(ordinal) for ordinal in range(8)]
+    assert select_first_three_qualified(rows) == ()
+
+
+def test_one_event_with_a_single_candidate_is_unqualified_without_raising():
+    row = qualified_row(0, selected_event_has_two_candidates=False)
+    assert mechanically_qualifies(row) is False
+
+
+@pytest.mark.parametrize("value", [-1, 2, 3, True, False, "0", 0.0, None])
+def test_malformed_selected_event_counts_are_rejected(value):
+    row = qualified_row(0, selected_event_count=value)
+    with pytest.raises(ValueError, match="selected_event_count must be"):
+        mechanically_qualifies(row)
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    [
+        (
+            {"selected_event_count": 0, "eligible_event_exists": True},
+            "conflicts with eligible_event_exists",
+        ),
+        (
+            {
+                "selected_event_count": 0,
+                "eligible_event_exists": False,
+                "selected_event_has_two_candidates": True,
+            },
+            "conflicts with candidate availability",
+        ),
+        (
+            {"selected_event_count": 1, "eligible_event_exists": False},
+            "requires eligible_event_exists",
+        ),
+    ],
+)
+def test_contradictory_qualification_rows_are_structural_errors(updates, message):
+    row = qualified_row(0, **updates)
+    with pytest.raises(ValueError, match=message):
+        mechanically_qualifies(row)
+
+
+def test_malformed_rows_are_never_silently_converted_to_false():
+    with pytest.raises(ValueError, match="strict bool"):
+        mechanically_qualifies(qualified_row(0, meaningful_compression="yes"))
+    with pytest.raises(ValueError, match="candidate_ordinal must be a strict int"):
+        mechanically_qualifies(qualified_row("0"))
 
 
 def test_candidate_pool_order_maximum_four_and_tie_breaking():
@@ -105,7 +202,7 @@ def test_one_event_per_example_is_structurally_represented_by_selected_event():
     selected = select_first_three_qualified([row])
     assert selected[0]["selected_event"] == {"event_index": 7}
     row["selected_event_count"] = 2
-    with pytest.raises(ValueError, match="exactly one"):
+    with pytest.raises(ValueError, match="must be zero or one"):
         select_first_three_qualified([row])
 
 

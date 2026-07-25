@@ -77,6 +77,15 @@ def _assert_no_outcome_fields(value: Any, *, path: str = "row") -> None:
 
 
 def mechanically_qualifies(row: dict[str, Any]) -> bool:
+    """Decide whether one candidate row mechanically qualifies.
+
+    Zero selected events is a legitimate, ordinary non-qualifying outcome —
+    an example whose compaction events produced no eligible event plan is
+    simply not usable, not malformed.  A structural error (a wrong type, an
+    impossible count, or a self-contradictory row) still raises, because
+    silently converting malformed evidence to ``False`` would let a broken
+    worker record masquerade as a clean scientific non-qualifier.
+    """
     _assert_no_outcome_fields(row)
     required_bools = (
         "fullkv_execution_valid",
@@ -92,8 +101,25 @@ def mechanically_qualifies(row: dict[str, Any]) -> bool:
             raise ValueError(f"qualification field {field!r} must be a strict bool")
     if type(row.get("candidate_ordinal")) is not int:
         raise ValueError("candidate_ordinal must be a strict int")
-    if row.get("selected_event_count") != 1:
-        raise ValueError("qualification requires exactly one selected event")
+
+    selected_event_count = row.get("selected_event_count")
+    # ``bool`` is a subclass of ``int``; an identity check keeps ``True``
+    # from being accepted as the integer one.
+    if type(selected_event_count) is not int:
+        raise ValueError("selected_event_count must be a strict int")
+    if selected_event_count not in (0, 1):
+        raise ValueError("selected_event_count must be zero or one")
+
+    if selected_event_count == 0:
+        if row["eligible_event_exists"]:
+            raise ValueError("zero selected events conflicts with eligible_event_exists")
+        if row["selected_event_has_two_candidates"]:
+            raise ValueError("zero selected events conflicts with candidate availability")
+        return False
+
+    if not row["eligible_event_exists"]:
+        raise ValueError("one selected event requires eligible_event_exists")
+
     return all(row[field] for field in required_bools)
 
 
